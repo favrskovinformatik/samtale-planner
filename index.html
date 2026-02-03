@@ -72,51 +72,46 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
         
         samtaler = []
         lærer_counts = {}
-        
         for idx, row in df.iterrows():
             rå_ønsker = [x.strip() for x in str(row['Ønsker']).split(',') if x.strip()]
             for item in rå_ønsker:
                 lær = item.split()[0]
-                samtaler.append({
-                    'Elevnavn': row['Elevnavn'], 'Elevid': row['Elevid'],
-                    'Lærer': lær, 'Klasse': row['Klasse']
-                })
+                samtaler.append({'Elevnavn': row['Elevnavn'], 'Elevid': row['Elevid'], 'Lærer': lær, 'Klasse': row['Klasse']})
                 lærer_counts[lær] = lærer_counts.get(lær, 0) + 1
         
         df_samtaler = pd.DataFrame(samtaler)
-        if df_samtaler.empty: return "Ingen gyldige ønsker fundet.", {}
-
-        # Prioritering: Lærere med under 5 samtaler først for tidlig start
-        lærere_små = [l for l, c in lærer_counts.items() if c < 5]
+        alle_lærere = df_samtaler['Lærer'].unique()
         
-        lærer_fri = {l: start_dt for l in df_samtaler['Lærer'].unique()}
+        # NY PRIORITERINGSRÆKKEFØLGE:
+        # 1. Lærere med låste tider
+        # 2. Lærere med under 5 samtaler (for at få dem tidligt ud)
+        # 3. Resten
+        lærere_låst = [l for l in alle_lærere if l in spec_tider_dict]
+        lærere_små = [l for l in alle_lærere if l not in lærere_låst and lærer_counts.get(l, 0) < 5]
+        lærere_rest = [l for l in alle_lærere if l not in lærere_låst and l not in lærere_små]
+        
+        prioriteret_rækkefølge = lærere_låst + lærere_små + lærere_rest
+
+        lærer_fri = {l: start_dt for l in alle_lærere}
         elev_fri = {e: start_dt for e in df_samtaler['Elevid'].unique()}
         
-        # Obligatoriske starttider (fastlåses i kalenderen)
+        # Sæt de obligatoriske starttider
         for key, t_str in spec_tider_dict.items():
             t_dt = datetime.strptime(t_str, "%H:%M")
             if key in lærer_fri: lærer_fri[key] = t_dt
             if key in elev_fri: elev_fri[key] = t_dt
 
-        # Sorter samtaler: Små lærere først, derefter elevid for sammenhæng
-        df_samtaler['små_lærer'] = df_samtaler['Lærer'].apply(lambda x: 1 if x in lærere_små else 2)
-        df_samtaler = df_samtaler.sort_values(['små_lærer', 'Elevid'])
-
         færdig_plan = []
-        for _, r in df_samtaler.iterrows():
-            lær, e_id = r['Lærer'], r['Elevid']
-            
-            # Obligatorisk starttid tjek: Hvis en af parterne har en fast tid, bruges den.
-            # Ellers bruges den tidligst mulige fælles tid.
-            st_tid = max(lærer_fri[lær], elev_fri[e_id])
-            sl_tid = st_tid + timedelta(minutes=varighed_min)
-            
-            færdig_plan.append({
-                'Elevnavn': r['Elevnavn'], 'Elevid': e_id, 'Klasse': r['Klasse'],
-                'Lærer': lær, 'Start_dt': st_tid, 'Slut_dt': sl_tid
-            })
-            lærer_fri[lær] = sl_tid
-            elev_fri[e_id] = sl_tid
+        # Planlæg lærer for lærer for at sikre kompakte skemaer
+        for lær in prioriteret_rækkefølge:
+            mine_samtaler = df_samtaler[df_samtaler['Lærer'] == lær]
+            for _, r in mine_samtaler.iterrows():
+                e_id = r['Elevid']
+                st_tid = max(lærer_fri[lær], elev_fri[e_id])
+                sl_tid = st_tid + timedelta(minutes=varighed_min)
+                færdig_plan.append({'Elevnavn': r['Elevnavn'], 'Elevid': e_id, 'Klasse': r['Klasse'], 'Lærer': lær, 'Start_dt': st_tid, 'Slut_dt': sl_tid})
+                lærer_fri[lær] = sl_tid
+                elev_fri[e_id] = sl_tid
 
         res_df = pd.DataFrame(færdig_plan)
         lokaler = [l.strip() for l in lokaler_raw.split(',') if l.strip()]
@@ -143,8 +138,7 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
 
     except Exception as e: return str(e), {}
 
-# --- EXCEL ---
-
+# --- EXCEL --- (Samme som før)
 def generate_excel_elev(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -182,7 +176,7 @@ if uploaded_file:
             delte = [f"{lok} ({', '.join([str(b) for b in br if pd.notna(b)])})" for lok, br in lok_brug.items() if len([b for b in br if pd.notna(b)]) > 1]
             sidste = res.sort_values('Start_dt').iloc[-1]
             if any(res['Lokale'] == "⚠️ MANGLER LOKALE"): st.error("⚠️ MANGEL PÅ LOKALER!")
-            st.success(f"Færdig! Sidste samtale slutter kl. {sidste['Slut_dt'].strftime('%H:%M')} ({sidste['Lærer']}).")
+            st.success(f"Færdig! Sidste samtale kl. {sidste['Slut_dt'].strftime('%H:%M')} ({sidste['Lærer']}).")
             if delte: st.warning(f"ℹ️ Delte lokaler: {'; '.join(delte)}")
             c1, c2 = st.columns(2)
             c1.download_button("📥 Hent Elevoversigt", data=generate_excel_elev(res), file_name="Elevoversigt.xlsx")
