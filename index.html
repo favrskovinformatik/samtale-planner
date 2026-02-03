@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <title>Samtaleplanlægger</title>
+    <script src="https://cdn.jsdelivr.net/gh/gzuidhof/coi-serviceworker@latest/coi-serviceworker.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.39.0/build/stlite.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script src="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.39.0/build/stlite.js"></script>
+    <script>
+      stlite.mount({
+        requirements: ["pandas", "openpyxl"],
+        files: {
+          "streamlit_app.py": `
+import streamlit as st
+import pandas as pd
+from datetime import datetime, timedelta
+import io
+
+st.set_page_config(page_title="Samtaleplanlægger", layout="wide")
+
+# --- CSS til styling ---
+st.markdown("""
+<style>
+    [data-testid="stSidebar"] { min-width: 450px !important; }
+    .stDataFrame { width: 100%; }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🗓️ Samtaleplanlægger")
+st.info("Denne app planlægger samtaler baseret på elevønsker og lokalebegrænsninger.")
+
+# --- SIDEBAR: Indstillinger ---
+st.sidebar.header("⚙️ Generelle Indstillinger")
+start_tid_gen = st.sidebar.text_input("Generelt starttidspunkt (tt:mm)", value="08:00")
+lokale_liste = st.sidebar.text_area("Lokaler (komma-separeret)", value="Lokale 1, Lokale 2, Lokale 3, Lokale 4")
+samtale_varighed = 10
+
+st.sidebar.header("👤 Specifikke starttider (Valgfrit)")
+specifikke_tider_input = st.sidebar.text_area("Format: Navn=tt:mm (f.eks. 'Lærer AB=09:00' eller 'Elev 123=08:30')", help="Én pr. linje")
+
+def parse_specifikke_tider(text):
+    res = {}
+    for line in text.split('\\n'):
+        if '=' in line:
+            parts = line.split('=')
+            res[parts[0].strip()] = parts[1].strip()
+    return res
+
+# --- LOGIK: Planlægningsmotor ---
+def planlæg_samtaler(df, start_gen, lokaler_str, spec_tider):
+    try:
+        start_dt_gen = datetime.strptime(start_gen.replace(".", ":"), "%H:%M")
+        lokaler = [l.strip() for l in lokaler_str.split(",") if l.strip()]
+        
+        # 1. Forbered data
+        # 'Ønsker' kolonnen splittes op (antager komma-separeret lærernavne/initialer)
+        df['Lærer_Liste'] = df['Ønsker'].astype(str).apply(lambda x: [i.strip() for i in x.split(',')])
+        
+        alle_ønsker = []
+        for _, row in df.iterrows():
+            for lærer in row['Lærer_Liste']:
+                alle_ønsker.append({
+                    'Elevnavn': row['Elevnavn'],
+                    'Elevid': str(row['Elevid']),
+                    'Lærer': lærer
+                })
+        
+        ønsker_df = pd.DataFrame(alle_ønsker)
+        lærere = ønsker_df['Lærer'].unique()
+        
+        # 2. Tildel lokaler til lærere (En lærer har ét lokale)
+        lærer_lokale = {}
+        lokale_ledig_fra = {l: start_dt_gen for l in lokaler}
+        
+        # Sorter lærere efter belastning for at fylde lokaler effektivt
+        lærer_belastning = ønsker_df['Lærer'].value_counts()
+        for i, lærer in enumerate(lærer_belastning.index):
+            assigned_lokale = lokaler[i % len(lokaler)]
+            lærer_lokale[lærer] = assigned_lokale
+
+        # 3. Planlægning
+        bookinger = [] # Liste af dicts: {Elev, Lærer, Lokale, Start, Slut}
+        lærer_optaget_indtil = {lærer: start_dt_gen for lærer in lærere}
+        elev_optaget_indtil = {str(eid): start_dt_gen for eid in df['Elevid']}
+        
+        # Håndter specifikke starttider
+        for navn, tid_str in spec_tider.items():
+            t_dt = datetime.strptime(tid_str.replace(".", ":"), "%H:%M")
+            if navn in lærer_optaget_indtil:
+                lærer_optaget_indtil[navn] = t_dt
+            if navn in elev_optaget_indtil:
+                elev_optaget_indtil[navn] = t_dt
+
+        # Sorter ønsker for at forsøge at samle elevens samtaler
+        # Vi tager én elev ad gangen
+        for eid in df['Elevid'].astype(str):
+            elev_samtaler = ønsker_df[ønsker_df['Elevid'] == eid]
+            
+            for _, r in elev_samtaler.iterrows():
+                l = r['Lærer']
+                lok = lærer_lokale[l]
+                
+                # Find det tidspunkt hvor både lærer, elev OG lokale er ledige
+                start_tid = max(lærer_optaget_indtil[l], elev_optaget_indtil[eid])
+                
+                slut_tid = start_tid + timedelta(minutes=samtale_varighed)
+                
+                bookinger.append({
+                    'Elevnavn': r['Elevnavn'],
+                    'Elevid': eid,
+                    'Lærer': l,
+                    'Lokale': lok,
+                    'Start': start_tid.strftime("%H:%M"),
+                    'Slut': slut_tid.strftime("%H:%M"),
+                    'Klasse': str(eid)[:2] # Antager de første to cifre er klassen
+                })
+                
+                lærer_optaget_indtil[l] = slut_tid
+                elev_optaget_indtil[eid] = slut_tid
+
+        return pd.DataFrame(bookinger)
+    except Exception as e:
+        st.error(f"Fejl i planlægning: {e}")
+        return None
+
+# --- UI: Fil Upload ---
+uploaded_file = st.file_uploader("Upload Excel-fil (Elevnavn, Elevid, Ønsker)", type=["xlsx"])
+
+if uploaded_file:
+    df_input = pd.read_excel(uploaded_file)
+    spec_tider = parse_specifikke_tider(specifikke_tider_input)
+    
+    res_df = planlæg_samtaler(df_input, start_tid_gen, lokale_liste, spec_tider)
+    
+    if res_df is not None:
+        st.success("✅ Planlægning genereret!")
+        
+        # --- OUTPUT 1: Læreroversigt ---
+        st.subheader("👨‍🏫 Læreroversigt")
+        # Pivot: Rækker = Tid, Kolonner = Lærer (Lokale)
+        res_df['Lærer_Lokale'] = res_df['Lærer'] + " (" + res_df['Lokale'] + ")"
+        laerer_pivot = res_df.pivot(index='Start', columns='Lærer_Lokale', values='Elevid').fillna("-")
+        st.dataframe(laerer_pivot, use_container_width=True)
+        
+        # --- OUTPUT 2: Elevoversigt (Klasseopdelt) ---
+        st.subheader("🎓 Elevoversigt (pr. klasse)")
+        klasser = sorted(res_df['Klasse'].unique())
+        
+        for kl in klasser:
+            with st.expander(f"Klasse {kl}"):
+                kl_df = res_df[res_df['Klasse'] == kl]
+                # Pivot: Rækker = Elevnavn, Kolonner = Lærer (Lokale), Værdier = Tid
+                elev_pivot = kl_df.pivot(index='Elevnavn', columns='Lærer_Lokale', values='Start').fillna("-")
+                st.dataframe(elev_pivot, use_container_width=True)
+
+        # --- DOWNLOAD ---
+        def to_excel(df_res):
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                # Samlet ark
+                df_res.to_excel(writer, index=False, sheet_name='Samlet_Plan')
+                # Lærer ark
+                laerer_pivot.to_excel(writer, sheet_name='Laerer_Oversigt')
+            return output.getvalue()
+
+        st.download_button("📥 Hent Plan (Excel)", to_excel(res_df), "samtaleplan.xlsx")
+`
+        },
+      });
+    </script>
+  </body>
+</html>
