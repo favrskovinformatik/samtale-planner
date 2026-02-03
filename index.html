@@ -37,17 +37,21 @@ st.title("🗓️ Samtaleplanlægger")
 
 # --- SIDEBAR ---
 st.sidebar.header("1. Indstillinger")
-start_tid_input = st.sidebar.text_input("Starttidspunkt (tt.mm)", value="08.00")
+# Ændring 1: Default starttidspunkt sat til 17.00
+start_tid_input = st.sidebar.text_input("Starttidspunkt (tt.mm)", value="17.00")
 varighed = st.sidebar.number_input("Varighed (min)", value=10, step=5)
 
 st.sidebar.markdown("---")
 st.sidebar.header("2. Lokaler & Logistik")
 lokale_buffer = st.sidebar.number_input("Pause ved lærerskift i lokale (min)", value=10, step=5)
-lokale_str = st.sidebar.text_area("Lokaler (komma-separeret)", value="308, 309, 321, 510, 513")
+
+# Ændring 2: Ny default lokaleliste (inkl. tekst-baserede lokaler)
+default_lokaler = "101, 409, 308, 309, 310, 312, 313, 315, 317, 508, 509, 510, 511, 513, 320, 321, 322, 323, 324, 210, 211, 213, 215, 216, 217, 218, 219, 220, Møde 1, Møde 2, Møde 3, Møde 4, Møde 5"
+lokale_str = st.sidebar.text_area("Lokaler (komma-separeret)", value=default_lokaler)
 
 st.sidebar.markdown("---")
 st.sidebar.header("3. Specifikke ønsker")
-specifikke_tider_raw = st.sidebar.text_area("Låste tider (Format: ID=tt.mm)", placeholder="AB=09.00\\n1q 18=08.30")
+specifikke_tider_raw = st.sidebar.text_area("Låste tider (Format: ID=tt.mm)", placeholder="AB=17.30\\n1q 18=17.00")
 
 # --- LOGIK ---
 
@@ -119,7 +123,9 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
 
         res_df = pd.DataFrame(færdig_plan)
 
-        lokaler = sorted([l.strip() for l in lokaler_raw.split(',') if l.strip()])
+        # Ændring 2: Sortering der håndterer både tal og tekst (Møde 1 osv)
+        lokaler = [l.strip() for l in lokaler_raw.split(',') if l.strip()]
+        
         lærer_blokke = res_df.groupby('Lærer').agg(Min_Start=('Start_dt', 'min'), Max_Slut=('Slut_dt', 'max')).reset_index()
         lærer_blokke['Primær_Klasse'] = lærer_blokke['Lærer'].map(primær_klasse)
         lærer_blokke = lærer_blokke.sort_values(['Primær_Klasse', 'Min_Start'])
@@ -136,7 +142,8 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
                     valgt = lok
                     lokale_ledig_fra[lok] = row['Max_Slut']
                     break
-            lærer_til_lokale[lær] = valgt if valgt else "⚠️ MGL. LOKALE"
+            # Ændring 4: Markør for manglende lokale
+            lærer_til_lokale[lær] = valgt if valgt else "⚠️ MANGLER LOKALE"
 
         res_df['Lokale'] = res_df['Lærer'].map(lærer_til_lokale)
         res_df['Start'] = res_df['Start_dt'].dt.strftime("%H:%M")
@@ -149,7 +156,6 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
 # --- EXCEL GENERERING ---
 
 def prep_pivot(df_sub, index_col, col_cols, value_col):
-    # Denne hjælpefunktion sikrer at overskrifter er tekststrenge (fjerner Tuple-fejlen)
     pivot = df_sub.pivot_table(index=index_col, columns=col_cols, values=value_col, aggfunc='first').fillna("")
     if isinstance(pivot.columns, pd.MultiIndex):
         pivot.columns = [f"{l} ({loc})" for l, loc in pivot.columns]
@@ -186,20 +192,21 @@ if uploaded_file:
         if isinstance(res, str):
             st.error(f"Fejl: {res}")
         else:
-            st.success("Plan genereret!")
+            # Ændring 4: Tjek for manglende lokaler og vis det på forsiden
+            mangler_lokaler = res[res['Lokale'] == "⚠️ MANGLER LOKALE"]['Lærer'].unique()
+            if len(mangler_lokaler) > 0:
+                st.error(f"⚠️ MANGEL PÅ LOKALER: Følgende lærere kunne ikke tildeles et lokale pga. buffer-kravet: {', '.join(mangler_lokaler)}")
+                st.warning("Overvej at tilføje flere lokaler eller reducere buffer-tiden.")
+            else:
+                st.success("Plan genereret uden fejl!")
             
+            # Ændring 3: Kun download-knapper, ingen forhåndsvisning
+            st.subheader("Hent planer")
             col1, col2 = st.columns(2)
             with col1:
-                st.download_button("📥 Hent Elevoversigt", data=generate_excel_elev(res), file_name="Elevoversigt_pr_klasse.xlsx")
+                st.download_button("📥 Hent Elevoversigt (pr. klasse)", data=generate_excel_elev(res), file_name="Elevoversigt_pr_klasse.xlsx")
             with col2:
-                st.download_button("📥 Hent Læreroversigt", data=generate_excel_laerer(res), file_name="Laereroversigt_pr_klasse.xlsx")
-
-            st.divider()
-            tab1, tab2 = st.tabs(["👨‍🏫 Forhåndsvisning Lærere", "🎓 Forhåndsvisning Elever"])
-            with tab1:
-                st.dataframe(prep_pivot(res, 'Start', ['Lærer', 'Lokale'], 'Elevid'), use_container_width=True)
-            with tab2:
-                st.dataframe(prep_pivot(res, 'Elevnavn', ['Lærer', 'Lokale'], 'Start'), use_container_width=True)
+                st.download_button("📥 Hent Læreroversigt (pr. klasse)", data=generate_excel_laerer(res), file_name="Laereroversigt_pr_klasse.xlsx")
     else:
         st.error("Manglende kolonner i Excel.")
 `
