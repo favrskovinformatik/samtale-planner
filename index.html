@@ -52,8 +52,6 @@ st.table(pd.DataFrame(example_data))
 
 st.markdown("---")
 
-
-
 # --- SIDEBAR ---
 st.sidebar.header("1. Indstillinger")
 start_tid_input = st.sidebar.text_input("Starttidspunkt (tt.mm)", value="17.00")
@@ -125,16 +123,28 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
                 mine_elever = resterende[resterende['Lærer'] == lær]
                 if mine_elever.empty: break
                 
-                # Find elev der er ledig TIDLIGST for at minimere ventetid
+                # SIKRINGS-LOGIK: Find elev der er ledig med under 20 min ventetid
                 bedste_elev_idx = -1
                 tidligste_start = datetime.max
                 
+                # 1. Forsøg først at finde et match med UNDER 20 min ventetid for eleven
                 for idx, row in mine_elever.iterrows():
                     e = row['Elevid']
                     mulig_start = max(lærer_fri[lær], elev_fri[e])
-                    if mulig_start < tidligste_start:
+                    ventetid = (mulig_start - elev_fri[e]).total_seconds() / 60
+                    
+                    if ventetid <= 20 and mulig_start < tidligste_start:
                         tidligste_start = mulig_start
                         bedste_elev_idx = idx
+                
+                # 2. Hvis ingen passer i 20-min vinduet, tag den der trods alt er ledig tidligst
+                if bedste_elev_idx == -1:
+                    for idx, row in mine_elever.iterrows():
+                        e = row['Elevid']
+                        mulig_start = max(lærer_fri[lær], elev_fri[e])
+                        if mulig_start < tidligste_start:
+                            tidligste_start = mulig_start
+                            bedste_elev_idx = idx
                 
                 valgt = mine_elever.loc[bedste_elev_idx]
                 st_tid = tidligste_start
