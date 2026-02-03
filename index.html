@@ -37,7 +37,6 @@ st.title("🗓️ Samtaleplanlægger")
 
 # --- SIDEBAR ---
 st.sidebar.header("1. Indstillinger")
-# Ændring 1: Widgets i Streamlit opdaterer som standard scriptet ved hver ændring.
 start_tid_input = st.sidebar.text_input("Starttidspunkt (tt.mm)", value="17.00")
 varighed = st.sidebar.number_input("Varighed (min)", value=10, step=5)
 
@@ -88,17 +87,15 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
                 lærer_klasser[lær].append(row['Klasse'])
         
         df_samtaler = pd.DataFrame(samtaler)
-        if df_samtaler.empty: return "Ingen gyldige ønsker fundet."
+        if df_samtaler.empty: return "Ingen gyldige ønsker fundet.", {}
 
         alle_lærere = df_samtaler['Lærer'].unique()
         alle_elever = df_samtaler['Elevid'].unique()
         primær_klasse = {l: max(set(k), key=k.count) for l, k in lærer_klasser.items()}
 
-        # Ændring 2: Prioritering af lærere med låste tider for at sikre ubrudte blokke
         lærer_fri = {l: start_dt for l in alle_lærere}
         elev_fri = {e: start_dt for e in alle_elever}
         
-        # Opdater starttider for dem med specifikke ønsker
         for id_key, tid_str in spec_tider_dict.items():
             try:
                 spec_dt = datetime.strptime(tid_str, "%H:%M")
@@ -107,7 +104,6 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
             except: pass
 
         færdig_plan = []
-        # Vi sorterer lærere, så dem med låste tider planlægges samlet først
         lærere_med_ønske = [l for l in alle_lærere if l in spec_tider_dict]
         andre_lærere = [l for l in alle_lærere if l not in spec_tider_dict]
         prioriteret_lærer_rækkefølge = lærere_med_ønske + andre_lærere
@@ -116,10 +112,8 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
             lær_samtaler = df_samtaler[df_samtaler['Lærer'] == lær]
             for _, r in lær_samtaler.iterrows():
                 e_id = r['Elevid']
-                # Starttid er når både lærer er ledig og elev er ledig
                 st_tid = max(lærer_fri[lær], elev_fri[e_id])
                 sl_tid = st_tid + timedelta(minutes=varighed_min)
-                
                 færdig_plan.append({
                     'Elevnavn': r['Elevnavn'], 'Elevid': e_id, 'Klasse': r['Klasse'],
                     'Lærer': lær, 'Start_dt': st_tid, 'Slut_dt': sl_tid
@@ -132,7 +126,6 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
         # LOKALE TILDELING
         lokaler = [l.strip() for l in lokaler_raw.split(',') if l.strip()]
         lærer_blokke = res_df.groupby('Lærer').agg(Min_Start=('Start_dt', 'min'), Max_Slut=('Slut_dt', 'max')).reset_index()
-        lærer_blokke['Primær_Klasse'] = lærer_blokke['Lærer'].map(primær_klasse)
         lærer_blokke = lærer_blokke.sort_values(['Min_Start'])
         
         lokale_ledig_fra = {lok: start_dt - timedelta(minutes=buffer_min) for lok in lokaler}
@@ -173,18 +166,27 @@ def generate_excel_elev(df):
     return output.getvalue()
 
 def generate_excel_laerer(df):
-    # Ændring 4: En fane for hver lærer i stedet for klasse
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        # Ændring 2: Samlet oversigt til administrationen
+        adm_pivot = df.pivot_table(index='Start', columns=['Lokale', 'Lærer'], values='Elevid', aggfunc='first').fillna("")
+        if isinstance(adm_pivot.columns, pd.MultiIndex):
+            adm_pivot.columns = [f"{lok}: {l}" for lok, l in adm_pivot.columns]
+        adm_pivot.to_excel(writer, sheet_name="ADMIN_SAMLET_PLAN")
+
+        # Ændring 1 + 4: Individuelle lærerark
         for lær in sorted(df['Lærer'].unique()):
             df_l = df[df['Lærer'] == lær]
             lokale = df_l['Lokale'].iloc[0]
-            # Simpel liste over lærerens samtaler
             skema = df_l[['Start', 'Elevnavn', 'Elevid', 'Klasse']].sort_values('Start')
             skema.columns = ['Tid', 'Elev', 'ID', 'Klasse']
-            # Sheet navne må max være 31 tegn
-            sheet_name = f"{lær} ({lokale})"[:31]
-            skema.to_excel(writer, sheet_name=sheet_name, index=False)
+            
+            # Skriv lokalet inde i arket
+            skema.to_excel(writer, sheet_name=lær[:31], index=False, startrow=2)
+            worksheet = writer.sheets[lær[:31]]
+            worksheet.write(0, 0, f"Lærer: {lær}")
+            worksheet.write(1, 0, f"Lokale: {lokale}")
+            
     return output.getvalue()
 
 # --- UI ---
@@ -200,24 +202,29 @@ if uploaded_file:
         if isinstance(res, str):
             st.error(f"Fejl: {res}")
         else:
-            # Ændring 3: Statusmeddelelse om manglende lokaler OG delte lokaler
+            # Ændring 3: Sluttidspunkt og sidste person
+            sidste_række = res.sort_values('Start_dt').iloc[-1]
+            slut_tid = sidste_række['Slut_dt'].strftime("%H:%M")
+            sidste_lærer = sidste_række['Lærer']
+            
             mangler = res[res['Lokale'] == "⚠️ MANGLER LOKALE"]['Lærer'].unique()
             delte_lokaler = [f"{lok} ({', '.join(brugere)})" for lok, brugere in lok_brug.items() if len(brugere) > 1]
             
             if len(mangler) > 0:
                 st.error(f"⚠️ MANGEL PÅ LOKALER: {', '.join(mangler)}")
             
+            # Statusmeddelelse inkl. sluttid
+            st.success(f"Plan genereret! Sidste samtale slutter kl. {slut_tid} (afvikles af {sidste_lærer}).")
+            
             if delte_lokaler:
                 st.warning(f"ℹ️ Lokaler der bruges af flere lærere: {'; '.join(delte_lokaler)}")
-            else:
-                st.success("Plan genereret!")
             
             st.subheader("Hent planer")
             col1, col2 = st.columns(2)
             with col1:
-                st.download_button("📥 Hent Elevoversigt (pr. klasse)", data=generate_excel_elev(res), file_name="Elevoversigt_pr_klasse.xlsx")
+                st.download_button("📥 Hent Elevoversigt", data=generate_excel_elev(res), file_name="Elevoversigt.xlsx")
             with col2:
-                st.download_button("📥 Hent Læreroversigt (pr. lærer)", data=generate_excel_laerer(res), file_name="Laereroversigt_pr_laerer.xlsx")
+                st.download_button("📥 Hent Læreroversigt", data=generate_excel_laerer(res), file_name="Laereroversigt.xlsx")
     else:
         st.error("Manglende kolonner i Excel.")
 `
