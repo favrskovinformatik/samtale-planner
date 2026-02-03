@@ -146,14 +146,21 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
     except Exception as e:
         return str(e)
 
-# --- EXCEL GENERERING FUNKTIONER ---
+# --- EXCEL GENERERING ---
+
+def prep_pivot(df_sub, index_col, col_cols, value_col):
+    # Denne hjælpefunktion sikrer at overskrifter er tekststrenge (fjerner Tuple-fejlen)
+    pivot = df_sub.pivot_table(index=index_col, columns=col_cols, values=value_col, aggfunc='first').fillna("")
+    if isinstance(pivot.columns, pd.MultiIndex):
+        pivot.columns = [f"{l} ({loc})" for l, loc in pivot.columns]
+    return pivot
 
 def generate_excel_elev(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         for klasse in sorted(df['Klasse'].unique()):
             df_k = df[df['Klasse'] == klasse]
-            pivot = df_k.pivot_table(index='Elevnavn', columns=['Lærer', 'Lokale'], values='Start', aggfunc='first').fillna("")
+            pivot = prep_pivot(df_k, 'Elevnavn', ['Lærer', 'Lokale'], 'Start')
             pivot.to_excel(writer, sheet_name=f'Klasse {klasse}')
     return output.getvalue()
 
@@ -162,7 +169,7 @@ def generate_excel_laerer(df):
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         for klasse in sorted(df['Klasse'].unique()):
             df_k = df[df['Klasse'] == klasse]
-            pivot = df_k.pivot_table(index='Start', columns=['Lærer', 'Lokale'], values='Elevid', aggfunc='first').fillna("")
+            pivot = prep_pivot(df_k, 'Start', ['Lærer', 'Lokale'], 'Elevid')
             pivot.to_excel(writer, sheet_name=f'Klasse {klasse}')
     return output.getvalue()
 
@@ -181,32 +188,18 @@ if uploaded_file:
         else:
             st.success("Plan genereret!")
             
-            st.subheader("Hent dine planer")
             col1, col2 = st.columns(2)
-            
             with col1:
-                st.download_button(
-                    label="📥 Hent Elevoversigt (Klasse-opdelt)",
-                    data=generate_excel_elev(res),
-                    file_name="Elevoversigt_pr_klasse.xlsx",
-                    mime="application/vnd.ms-excel"
-                )
-            
+                st.download_button("📥 Hent Elevoversigt", data=generate_excel_elev(res), file_name="Elevoversigt_pr_klasse.xlsx")
             with col2:
-                st.download_button(
-                    label="📥 Hent Læreroversigt (Klasse-opdelt)",
-                    data=generate_excel_laerer(res),
-                    file_name="Laereroversigt_pr_klasse.xlsx",
-                    mime="application/vnd.ms-excel"
-                )
+                st.download_button("📥 Hent Læreroversigt", data=generate_excel_laerer(res), file_name="Laereroversigt_pr_klasse.xlsx")
 
-            # Visning i appen (stadig i tabs)
             st.divider()
             tab1, tab2 = st.tabs(["👨‍🏫 Forhåndsvisning Lærere", "🎓 Forhåndsvisning Elever"])
             with tab1:
-                st.dataframe(res.pivot_table(index='Start', columns=['Lærer', 'Lokale'], values='Elevid', aggfunc='first').fillna(""), use_container_width=True)
+                st.dataframe(prep_pivot(res, 'Start', ['Lærer', 'Lokale'], 'Elevid'), use_container_width=True)
             with tab2:
-                st.dataframe(res.pivot_table(index='Elevnavn', columns=['Lærer', 'Lokale'], values='Start', aggfunc='first').fillna(""), use_container_width=True)
+                st.dataframe(prep_pivot(res, 'Elevnavn', ['Lærer', 'Lokale'], 'Start'), use_container_width=True)
     else:
         st.error("Manglende kolonner i Excel.")
 `
