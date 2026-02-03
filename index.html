@@ -43,7 +43,6 @@ varighed = st.sidebar.number_input("Varighed (min)", value=10, step=5)
 st.sidebar.markdown("---")
 st.sidebar.header("2. Lokaler & Logistik")
 lokale_buffer = st.sidebar.number_input("Pause ved lærerskift i lokale (min)", value=10, step=5)
-
 default_lokaler = "101, 409, 308, 309, 310, 312, 313, 315, 317, 508, 509, 510, 511, 513, 320, 321, 322, 323, 324, 210, 211, 213, 215, 216, 217, 218, 219, 220, Møde 1, Møde 2, Møde 3, Møde 4, Møde 5"
 lokale_str = st.sidebar.text_area("Lokaler (komma-separeret)", value=default_lokaler)
 
@@ -67,172 +66,127 @@ def parse_tider(text_input):
 def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffer_min):
     try:
         start_dt = datetime.strptime(start_str.replace('.', ':'), "%H:%M")
-        
-        # Rens data for tomme rækker
         df = df.dropna(subset=['Elevnavn', 'Elevid', 'Ønsker'])
         df['Elevid'] = df['Elevid'].astype(str).str.strip()
         df['Klasse'] = df['Elevid'].str[:2]
         
         samtaler = []
-        lærer_klasser = {} 
+        lærer_counts = {}
         
         for idx, row in df.iterrows():
             rå_ønsker = [x.strip() for x in str(row['Ønsker']).split(',') if x.strip()]
             for item in rå_ønsker:
-                dele = item.split()
-                if not dele: continue
-                lær = dele[0]
+                lær = item.split()[0]
                 samtaler.append({
                     'Elevnavn': row['Elevnavn'], 'Elevid': row['Elevid'],
                     'Lærer': lær, 'Klasse': row['Klasse']
                 })
-                if lær not in lærer_klasser: lærer_klasser[lær] = []
-                lærer_klasser[lær].append(row['Klasse'])
+                lærer_counts[lær] = lærer_counts.get(lær, 0) + 1
         
         df_samtaler = pd.DataFrame(samtaler)
         if df_samtaler.empty: return "Ingen gyldige ønsker fundet.", {}
 
-        alle_lærere = df_samtaler['Lærer'].unique()
-        alle_elever = df_samtaler['Elevid'].unique()
-
-        lærer_fri = {l: start_dt for l in alle_lærere}
-        elev_fri = {e: start_dt for e in alle_elever}
+        # Prioritering: Lærere med under 5 samtaler først for tidlig start
+        lærere_små = [l for l, c in lærer_counts.items() if c < 5]
         
-        for id_key, tid_str in spec_tider_dict.items():
-            try:
-                spec_dt = datetime.strptime(tid_str, "%H:%M")
-                if id_key in lærer_fri: lærer_fri[id_key] = spec_dt
-                if id_key in elev_fri: elev_fri[id_key] = spec_dt
-            except: pass
+        lærer_fri = {l: start_dt for l in df_samtaler['Lærer'].unique()}
+        elev_fri = {e: start_dt for e in df_samtaler['Elevid'].unique()}
+        
+        # Obligatoriske starttider (fastlåses i kalenderen)
+        for key, t_str in spec_tider_dict.items():
+            t_dt = datetime.strptime(t_str, "%H:%M")
+            if key in lærer_fri: lærer_fri[key] = t_dt
+            if key in elev_fri: elev_fri[key] = t_dt
+
+        # Sorter samtaler: Små lærere først, derefter elevid for sammenhæng
+        df_samtaler['små_lærer'] = df_samtaler['Lærer'].apply(lambda x: 1 if x in lærere_små else 2)
+        df_samtaler = df_samtaler.sort_values(['små_lærer', 'Elevid'])
 
         færdig_plan = []
-        lærere_med_ønske = [l for l in alle_lærere if l in spec_tider_dict]
-        andre_lærere = [l for l in alle_lærere if l not in spec_tider_dict]
-        prioriteret_lærer_rækkefølge = lærere_med_ønske + andre_lærere
-
-        for lær in prioriteret_lærer_rækkefølge:
-            lær_samtaler = df_samtaler[df_samtaler['Lærer'] == lær]
-            for _, r in lær_samtaler.iterrows():
-                e_id = r['Elevid']
-                st_tid = max(lærer_fri[lær], elev_fri[e_id])
-                sl_tid = st_tid + timedelta(minutes=varighed_min)
-                færdig_plan.append({
-                    'Elevnavn': r['Elevnavn'], 'Elevid': e_id, 'Klasse': r['Klasse'],
-                    'Lærer': lær, 'Start_dt': st_tid, 'Slut_dt': sl_tid
-                })
-                lærer_fri[lær] = sl_tid
-                elev_fri[e_id] = sl_tid
+        for _, r in df_samtaler.iterrows():
+            lær, e_id = r['Lærer'], r['Elevid']
+            
+            # Obligatorisk starttid tjek: Hvis en af parterne har en fast tid, bruges den.
+            # Ellers bruges den tidligst mulige fælles tid.
+            st_tid = max(lærer_fri[lær], elev_fri[e_id])
+            sl_tid = st_tid + timedelta(minutes=varighed_min)
+            
+            færdig_plan.append({
+                'Elevnavn': r['Elevnavn'], 'Elevid': e_id, 'Klasse': r['Klasse'],
+                'Lærer': lær, 'Start_dt': st_tid, 'Slut_dt': sl_tid
+            })
+            lærer_fri[lær] = sl_tid
+            elev_fri[e_id] = sl_tid
 
         res_df = pd.DataFrame(færdig_plan)
-
-        # LOKALE TILDELING
         lokaler = [l.strip() for l in lokaler_raw.split(',') if l.strip()]
-        lærer_blokke = res_df.groupby('Lærer').agg(Min_Start=('Start_dt', 'min'), Max_Slut=('Slut_dt', 'max')).reset_index()
-        lærer_blokke = lærer_blokke.sort_values(['Min_Start'])
+        lærer_blokke = res_df.groupby('Lærer').agg(Min_Start=('Start_dt', 'min'), Max_Slut=('Slut_dt', 'max')).reset_index().sort_values('Min_Start')
         
         lokale_ledig_fra = {lok: start_dt - timedelta(minutes=buffer_min) for lok in lokaler}
         lærer_til_lokale = {}
         lokale_brugere = {lok: [] for lok in lokaler}
         
         for _, row in lærer_blokke.iterrows():
-            lær = row['Lærer']
-            s_blok = row['Min_Start']
+            lær, s_blok = row['Lærer'], row['Min_Start']
             valgt = None
             for lok in lokaler:
                 if s_blok >= lokale_ledig_fra[lok] + timedelta(minutes=buffer_min):
                     valgt = lok
                     lokale_ledig_fra[lok] = row['Max_Slut']
-                    lokale_brugere[lok].append(str(lær)) # Sikrer streng-format
+                    lokale_brugere[lok].append(str(lær))
                     break
             lærer_til_lokale[lær] = valgt if valgt else "⚠️ MANGLER LOKALE"
 
         res_df['Lokale'] = res_df['Lærer'].map(lærer_til_lokale)
         res_df['Start'] = res_df['Start_dt'].dt.strftime("%H:%M")
-        
         return res_df, lokale_brugere
 
-    except Exception as e:
-        return str(e), {}
+    except Exception as e: return str(e), {}
 
-# --- EXCEL GENERERING ---
+# --- EXCEL ---
 
 def generate_excel_elev(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        for klasse in sorted(df['Klasse'].unique()):
-            df_k = df[df['Klasse'] == klasse]
-            pivot = df_k.pivot_table(index='Elevnavn', columns=['Lærer', 'Lokale'], values='Start', aggfunc='first').fillna("")
-            if isinstance(pivot.columns, pd.MultiIndex):
-                pivot.columns = [f"{l} ({loc})" for l, loc in pivot.columns]
-            pivot.to_excel(writer, sheet_name=f'Klasse {klasse}')
+        for k in sorted(df['Klasse'].unique()):
+            df_k = df[df['Klasse'] == k]
+            p = df_k.pivot_table(index='Elevnavn', columns=['Lærer', 'Lokale'], values='Start', aggfunc='first').fillna("")
+            if isinstance(p.columns, pd.MultiIndex): p.columns = [f"{l} ({loc})" for l, loc in p.columns]
+            p.to_excel(writer, sheet_name=f'Klasse {k}')
     return output.getvalue()
 
 def generate_excel_laerer(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        adm_pivot = df.pivot_table(index='Start', columns=['Lokale', 'Lærer'], values='Elevid', aggfunc='first').fillna("")
-        if isinstance(adm_pivot.columns, pd.MultiIndex):
-            adm_pivot.columns = [f"{lok}: {l}" for lok, l in adm_pivot.columns]
-        adm_pivot.to_excel(writer, sheet_name="ADMIN_SAMLET_PLAN")
-
+        adm = df.pivot_table(index='Start', columns=['Lokale', 'Lærer'], values='Elevid', aggfunc='first').fillna("")
+        if isinstance(adm.columns, pd.MultiIndex): adm.columns = [f"{lok}: {l}" for lok, l in adm.columns]
+        adm.to_excel(writer, sheet_name="ADMIN_SAMLET_PLAN")
         for lær in sorted(df['Lærer'].unique()):
             df_l = df[df['Lærer'] == lær]
-            lokale = df_l['Lokale'].iloc[0]
-            skema = df_l[['Start', 'Elevnavn', 'Elevid', 'Klasse']].sort_values('Start')
-            skema.columns = ['Tid', 'Elev', 'ID', 'Klasse']
-            
-            # Ark-navn renses for ugyldige tegn
-            sheet_name = str(lær)[:31].replace('[','').replace(']','').replace('*','').replace('?','').replace(':','').replace('/','').replace('\\\\','')
-            skema.to_excel(writer, sheet_name=sheet_name, index=False, startrow=2)
-            worksheet = writer.sheets[sheet_name]
-            worksheet.write(0, 0, f"Lærer: {lær}")
-            worksheet.write(1, 0, f"Lokale: {lokale}")
-            
+            sh = str(lær)[:31].translate({ord(c): None for c in '[]*?/:\\\\'})
+            df_l[['Start', 'Elevnavn', 'Elevid', 'Klasse']].sort_values('Start').to_excel(writer, sheet_name=sh, index=False, startrow=2)
+            ws = writer.sheets[sh]
+            ws.write(0, 0, f"Lærer: {lær}"); ws.write(1, 0, f"Lokale: {df_l['Lokale'].iloc[0]}")
     return output.getvalue()
 
 # --- UI ---
 st.info("Krav: Kolonner 'Elevnavn', 'Elevid', 'Ønsker'.")
-
 uploaded_file = st.file_uploader("Upload Excel", type=["xlsx"])
 
 if uploaded_file:
     df_in = pd.read_excel(uploaded_file)
     if all(col in df_in.columns for col in ['Elevnavn', 'Elevid', 'Ønsker']):
         res, lok_brug = beregn_plan(df_in, start_tid_input, lokale_str, parse_tider(specifikke_tider_raw), varighed, lokale_buffer)
-        
-        if isinstance(res, str):
-            st.error(f"Fejl: {res}")
+        if isinstance(res, str): st.error(f"Fejl: {res}")
         else:
-            # Rettelse af fejlen: Sikrer at alle elementer i join er strenge og filtrerer tomme brugere
-            delte_lokaler = []
-            for lok, brugere in lok_brug.items():
-                # Filtrer evt. NaT/None værdier og sørg for tekst-format
-                gyldige_brugere = [str(b) for b in brugere if pd.notna(b)]
-                if len(gyldige_brugere) > 1:
-                    delte_lokaler.append(f"{lok} ({', '.join(gyldige_brugere)})")
-
-            sidste_række = res.sort_values('Start_dt').iloc[-1]
-            slut_tid = sidste_række['Slut_dt'].strftime("%H:%M")
-            sidste_lærer = sidste_række['Lærer']
-            
-            mangler = res[res['Lokale'] == "⚠️ MANGLER LOKALE"]['Lærer'].unique()
-            
-            if len(mangler) > 0:
-                st.error(f"⚠️ MANGEL PÅ LOKALER: {', '.join([str(m) for m in mangler])}")
-            
-            st.success(f"Plan genereret! Sidste samtale slutter kl. {slut_tid} (afvikles af {sidste_lærer}).")
-            
-            if delte_lokaler:
-                st.warning(f"ℹ️ Lokaler der bruges af flere lærere: {'; '.join(delte_lokaler)}")
-            
-            st.subheader("Hent planer")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.download_button("📥 Hent Elevoversigt", data=generate_excel_elev(res), file_name="Elevoversigt.xlsx")
-            with col2:
-                st.download_button("📥 Hent Læreroversigt", data=generate_excel_laerer(res), file_name="Laereroversigt.xlsx")
-    else:
-        st.error("Manglende kolonner i Excel.")
+            delte = [f"{lok} ({', '.join([str(b) for b in br if pd.notna(b)])})" for lok, br in lok_brug.items() if len([b for b in br if pd.notna(b)]) > 1]
+            sidste = res.sort_values('Start_dt').iloc[-1]
+            if any(res['Lokale'] == "⚠️ MANGLER LOKALE"): st.error("⚠️ MANGEL PÅ LOKALER!")
+            st.success(f"Færdig! Sidste samtale slutter kl. {sidste['Slut_dt'].strftime('%H:%M')} ({sidste['Lærer']}).")
+            if delte: st.warning(f"ℹ️ Delte lokaler: {'; '.join(delte)}")
+            c1, c2 = st.columns(2)
+            c1.download_button("📥 Hent Elevoversigt", data=generate_excel_elev(res), file_name="Elevoversigt.xlsx")
+            c2.download_button("📥 Hent Læreroversigt", data=generate_excel_laerer(res), file_name="Laereroversigt.xlsx")
 `
         },
       });
