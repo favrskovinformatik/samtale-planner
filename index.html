@@ -67,6 +67,9 @@ def parse_tider(text_input):
 def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffer_min):
     try:
         start_dt = datetime.strptime(start_str.replace('.', ':'), "%H:%M")
+        
+        # Rens data for tomme rækker
+        df = df.dropna(subset=['Elevnavn', 'Elevid', 'Ønsker'])
         df['Elevid'] = df['Elevid'].astype(str).str.strip()
         df['Klasse'] = df['Elevid'].str[:2]
         
@@ -91,7 +94,6 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
 
         alle_lærere = df_samtaler['Lærer'].unique()
         alle_elever = df_samtaler['Elevid'].unique()
-        primær_klasse = {l: max(set(k), key=k.count) for l, k in lærer_klasser.items()}
 
         lærer_fri = {l: start_dt for l in alle_lærere}
         elev_fri = {e: start_dt for e in alle_elever}
@@ -140,7 +142,7 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
                 if s_blok >= lokale_ledig_fra[lok] + timedelta(minutes=buffer_min):
                     valgt = lok
                     lokale_ledig_fra[lok] = row['Max_Slut']
-                    lokale_brugere[lok].append(lær)
+                    lokale_brugere[lok].append(str(lær)) # Sikrer streng-format
                     break
             lærer_til_lokale[lær] = valgt if valgt else "⚠️ MANGLER LOKALE"
 
@@ -168,22 +170,21 @@ def generate_excel_elev(df):
 def generate_excel_laerer(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        # Ændring 2: Samlet oversigt til administrationen
         adm_pivot = df.pivot_table(index='Start', columns=['Lokale', 'Lærer'], values='Elevid', aggfunc='first').fillna("")
         if isinstance(adm_pivot.columns, pd.MultiIndex):
             adm_pivot.columns = [f"{lok}: {l}" for lok, l in adm_pivot.columns]
         adm_pivot.to_excel(writer, sheet_name="ADMIN_SAMLET_PLAN")
 
-        # Ændring 1 + 4: Individuelle lærerark
         for lær in sorted(df['Lærer'].unique()):
             df_l = df[df['Lærer'] == lær]
             lokale = df_l['Lokale'].iloc[0]
             skema = df_l[['Start', 'Elevnavn', 'Elevid', 'Klasse']].sort_values('Start')
             skema.columns = ['Tid', 'Elev', 'ID', 'Klasse']
             
-            # Skriv lokalet inde i arket
-            skema.to_excel(writer, sheet_name=lær[:31], index=False, startrow=2)
-            worksheet = writer.sheets[lær[:31]]
+            # Ark-navn renses for ugyldige tegn
+            sheet_name = str(lær)[:31].replace('[','').replace(']','').replace('*','').replace('?','').replace(':','').replace('/','').replace('\\\\','')
+            skema.to_excel(writer, sheet_name=sheet_name, index=False, startrow=2)
+            worksheet = writer.sheets[sheet_name]
             worksheet.write(0, 0, f"Lærer: {lær}")
             worksheet.write(1, 0, f"Lokale: {lokale}")
             
@@ -202,18 +203,23 @@ if uploaded_file:
         if isinstance(res, str):
             st.error(f"Fejl: {res}")
         else:
-            # Ændring 3: Sluttidspunkt og sidste person
+            # Rettelse af fejlen: Sikrer at alle elementer i join er strenge og filtrerer tomme brugere
+            delte_lokaler = []
+            for lok, brugere in lok_brug.items():
+                # Filtrer evt. NaT/None værdier og sørg for tekst-format
+                gyldige_brugere = [str(b) for b in brugere if pd.notna(b)]
+                if len(gyldige_brugere) > 1:
+                    delte_lokaler.append(f"{lok} ({', '.join(gyldige_brugere)})")
+
             sidste_række = res.sort_values('Start_dt').iloc[-1]
             slut_tid = sidste_række['Slut_dt'].strftime("%H:%M")
             sidste_lærer = sidste_række['Lærer']
             
             mangler = res[res['Lokale'] == "⚠️ MANGLER LOKALE"]['Lærer'].unique()
-            delte_lokaler = [f"{lok} ({', '.join(brugere)})" for lok, brugere in lok_brug.items() if len(brugere) > 1]
             
             if len(mangler) > 0:
-                st.error(f"⚠️ MANGEL PÅ LOKALER: {', '.join(mangler)}")
+                st.error(f"⚠️ MANGEL PÅ LOKALER: {', '.join([str(m) for m in mangler])}")
             
-            # Statusmeddelelse inkl. sluttid
             st.success(f"Plan genereret! Sidste samtale slutter kl. {slut_tid} (afvikles af {sidste_lærer}).")
             
             if delte_lokaler:
