@@ -26,10 +26,12 @@ st.set_page_config(page_title="Samtaleplanlægger", layout="wide", page_icon="�
 
 st.markdown("""
 <style>
-    /* Forbedrer layout i sidebar så labels ikke knækker */
     [data-testid="stSidebar"] { min-width: 450px !important; }
-    .stTextInput label, .stTextArea label { white-space: nowrap !important; font-weight: bold; }
-    /* Gør tabeller pænere */
+    /* Sikrer at labels ikke knækker uhensigtsmæssigt */
+    .stTextInput label, .stTextArea label, .stNumberInput label { 
+        white-space: nowrap !important; 
+        font-weight: bold; 
+    }
     [data-testid="stDataFrameResizable"] { border: 1px solid #eee; }
 </style>
 """, unsafe_allow_html=True)
@@ -42,7 +44,8 @@ st.sidebar.header("1. Indstillinger")
 
 col1, col2 = st.sidebar.columns(2)
 with col1:
-    start_tid_input = st.text_input("Starttidspunkt (tt:mm)", value="08:00")
+    # Rettet: Bruger nu punktum i label og default value for at undgå visningsfejl
+    start_tid_input = st.text_input("Starttidspunkt (tt.mm)", value="08.00")
 with col2:
     varighed = st.number_input("Varighed (min)", value=10, step=5)
 
@@ -56,23 +59,25 @@ lokale_str = st.sidebar.text_area("Lokaler (komma-separeret)",
 
 st.sidebar.markdown("---")
 st.sidebar.header("3. Specifikke ønsker")
-st.sidebar.info("Her kan du låse starttider. Brug **Elevid** for elever og **Initialer** for lærere.")
+st.sidebar.info("Lås starttider her. Brug punktum i tiderne.")
+# Rettet: Eksempler bruger nu punktum
 specifikke_tider_raw = st.sidebar.text_area(
-    "Låste tider (Format: ID=tt:mm)",
-    placeholder="AB=09:00\\n1a05=08:30",
+    "Låste tider (Format: ID=tt.mm)",
+    placeholder="AB=09.00\\n1a05=08.30",
     height=150
 )
 
 # --- HJÆLPEFUNKTIONER ---
 
 def parse_tider(text_input):
-    """Omdanner tekstinput til dictionary"""
+    """Omdanner tekstinput til dictionary, håndterer både . og :"""
     låste_tider = {}
     if not text_input: return låste_tider
     for line in text_input.split('\\n'):
         if '=' in line:
             parts = line.split('=')
             key = parts[0].strip()
+            # Erstat punktum med kolon så Python forstår det internt
             time_val = parts[1].strip().replace('.', ':')
             låste_tider[key] = time_val
     return låste_tider
@@ -89,7 +94,6 @@ def get_template():
     return output.getvalue()
 
 def sorter_lokaler(lokaler_liste):
-    """Sorterer lokaler smart (så 10 kommer efter 2)"""
     def convert(text): return int(text) if text.isdigit() else text
     return sorted(lokaler_liste, key=convert)
 
@@ -97,15 +101,14 @@ def sorter_lokaler(lokaler_liste):
 
 def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffer_min):
     try:
+        # Håndter punktum i starttid
         start_dt = datetime.strptime(start_str.replace('.', ':'), "%H:%M")
         
         # 1. RENS DATA
         df['Elevid'] = df['Elevid'].astype(str).str.strip()
-        df['Klasse'] = df['Elevid'].str[:2] # Antager de to første tegn er klassen
+        df['Klasse'] = df['Elevid'].str[:2]
         
-        # Split 'Ønsker' op i rækker pr. samtale
         samtaler = []
-        # Optæl hvilke klasser hver lærer har mest (til lokale-sektionering)
         lærer_klasser = {} 
         
         for _, row in df.iterrows():
@@ -124,33 +127,25 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
         alle_lærere = df_samtaler['Lærer'].unique()
         alle_elever = df_samtaler['Elevid'].unique()
 
-        # Find "Hjemme-sektion" for hver lærer (den klasse de har flest af)
         primær_klasse = {l: max(set(k), key=k.count) for l, k in lærer_klasser.items()}
 
-        # 2. PLANLÆG TIDER (Elev-kompakthed)
-        # Vi holder styr på hvornår lærere og elever er ledige
+        # 2. PLANLÆG TIDER
         lærer_fri = {l: start_dt for l in alle_lærere}
         elev_fri = {e: start_dt for e in alle_elever}
         
-        # Indsæt specifikke starttider
         for id_key, tid_str in spec_tider_dict.items():
             try:
                 spec_dt = datetime.strptime(tid_str, "%H:%M")
                 if id_key in lærer_fri: lærer_fri[id_key] = spec_dt
                 if id_key in elev_fri: elev_fri[id_key] = spec_dt
-            except:
-                pass # Ignorer ugyldige tidsformater
+            except: pass
 
         færdig_plan = []
         
-        # Iterer gennem hver elev og planlæg deres samtaler back-to-back
         for elev_id in alle_elever:
             mine_samtaler = df_samtaler[df_samtaler['Elevid'] == elev_id]
-            
             for _, r in mine_samtaler.iterrows():
                 lær = r['Lærer']
-                
-                # Tidligste start er når både elev og lærer er fri
                 start = max(lærer_fri[lær], elev_fri[elev_id])
                 slut = start + timedelta(minutes=varighed_min)
                 
@@ -162,58 +157,42 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
                     'Start_dt': start,
                     'Slut_dt': slut
                 })
-                
-                # Opdater ledighed
                 lærer_fri[lær] = slut
                 elev_fri[elev_id] = slut
 
         res_df = pd.DataFrame(færdig_plan)
 
-        # 3. TILDEL LOKALER (Lærer-kontinuitet + Buffer + Nærhed)
+        # 3. TILDEL LOKALER
         lokaler = sorter_lokaler([l.strip() for l in lokaler_raw.split(',') if l.strip()])
         
-        # Vi skal vide hvornår en lærer starter første samtale og slutter sidste
         lærer_blokke = res_df.groupby('Lærer').agg(
             Min_Start=('Start_dt', 'min'),
             Max_Slut=('Slut_dt', 'max')
         ).reset_index()
         
-        # Sorter lærere: Først efter primær klasse (saml sektioner), så efter starttid
         lærer_blokke['Primær_Klasse'] = lærer_blokke['Lærer'].map(primær_klasse)
         lærer_blokke = lærer_blokke.sort_values(['Primær_Klasse', 'Min_Start'])
         
-        # Hold styr på hvornår hvert lokale er ledigt
         lokale_ledig_fra = {lok: start_dt - timedelta(minutes=buffer_min) for lok in lokaler}
-        # (Vi trækker buffer fra start, så første lærer kan starte præcis kl. starttid)
-
         lærer_til_lokale = {}
         
         for _, row in lærer_blokke.iterrows():
             lær = row['Lærer']
             start_blok = row['Min_Start']
             slut_blok = row['Max_Slut']
-            
             valgt_lokale = None
             
-            # Find første ledige lokale, der overholder buffer-kravet
             for lok in lokaler:
                 tidligst_mulig = lokale_ledig_fra[lok] + timedelta(minutes=buffer_min)
-                
-                # Hvis læreren starter senere end (lokale_fri + buffer), så er det OK
                 if start_blok >= tidligst_mulig:
                     valgt_lokale = lok
-                    # Opdater lokalets ledighed til når denne lærer er færdig
                     lokale_ledig_fra[lok] = slut_blok 
                     break
             
-            if valgt_lokale:
-                lærer_til_lokale[lær] = valgt_lokale
-            else:
-                lærer_til_lokale[lær] = "MGL. LOKALE"
+            lærer_til_lokale[lær] = valgt_lokale if valgt_lokale else "MGL. LOKALE"
 
-        # Sæt lokaler og formater tider på hoved-dataframen
         res_df['Lokale'] = res_df['Lærer'].map(lærer_til_lokale)
-        res_df['Start'] = res_df['Start_dt'].dt.strftime("%H:%M")
+        res_df['Start'] = res_df['Start_dt'].dt.strftime("%H:%M") # Output format
         
         return res_df.sort_values(['Klasse', 'Elevnavn', 'Start_dt'])
 
@@ -222,13 +201,25 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
 
 # --- UI VISNING ---
 
+# NYT: Tydelig instruktion om Excel-format
+st.markdown("### 📋 Krav til Excel-filen")
+st.info("""
+For at systemet virker, **skal** din Excel-fil indeholde præcis disse 3 kolonner i række 1:
+
+1.  **Elevnavn** (Tekst, f.eks. "Jens Hansen")
+2.  **Elevid** (Unikt ID, f.eks. "1a01" eller "Jensen")
+3.  **Ønsker** (Komma-separerede initialer, f.eks. "AB, CD, EF")
+
+*Tip: Andre kolonner i arket bliver ignoreret.*
+""")
+
 col_upload, col_dl_temp = st.columns([3, 1])
 with col_dl_temp:
-    st.markdown("<br>", unsafe_allow_html=True) # Spacer
-    st.download_button("📥 Hent Skabelon", data=get_template(), file_name="skabelon_samtaler.xlsx", help="Hent en tom Excel-fil med de korrekte kolonner.")
+    st.markdown("<br><br>", unsafe_allow_html=True) # Spacer
+    st.download_button("📥 Hent Skabelon", data=get_template(), file_name="skabelon_samtaler.xlsx", help="Hent en tom Excel-fil der er klar til udfyldelse.")
 
 with col_upload:
-    uploaded_file = st.file_uploader("Upload udfyldt Excel-fil", type=["xlsx"])
+    uploaded_file = st.file_uploader("Upload din Excel-fil her", type=["xlsx"])
 
 if uploaded_file:
     try:
@@ -240,7 +231,7 @@ if uploaded_file:
         
         if mangler:
             st.error(f"❌ Fejl: Din fil mangler følgende kolonner: {', '.join(mangler)}")
-            st.info("Tip: Brug 'Hent Skabelon' knappen for at se det korrekte format.")
+            st.markdown("Se venligst vejledningen ovenfor eller hent skabelonen.")
         else:
             # KØR BEREGNING
             tider_dict = parse_tider(specifikke_tider_raw)
@@ -253,26 +244,22 @@ if uploaded_file:
                 lokale_buffer
             )
             
-            if isinstance(resultat, str): # Det er en fejlbesked
+            if isinstance(resultat, str):
                 st.error(f"Der skete en fejl under beregningen: {resultat}")
             else:
                 st.success("✅ Planlægningen er færdig!")
                 
                 # --- VIS RESULTATER ---
                 tab1, tab2 = st.tabs(["👨‍🏫 Læreroversigt", "🎓 Elevoversigt"])
-                
-                # Forbered lærer-header
                 resultat['Lærer_Visning'] = resultat['Lærer'] + " (" + resultat['Lokale'] + ")"
                 
                 with tab1:
                     st.markdown("**Lærernes tidsplan (Lokaler i parentes)**")
-                    # Pivot: Index=Tid, Kolonner=Lærer, Værdi=Elev
                     pivot_lær = resultat.pivot(index='Start', columns='Lærer_Visning', values='Elevid')
                     st.dataframe(pivot_lær.fillna(""), use_container_width=True)
                 
                 with tab2:
                     st.markdown("**Elevernes tidsplan**")
-                    # Loop gennem klasser
                     klasser = sorted(resultat['Klasse'].unique())
                     for k in klasser:
                         with st.expander(f"Klasse {k}", expanded=False):
@@ -283,13 +270,8 @@ if uploaded_file:
                 # --- EXCEL EXPORT ---
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    # Råt data ark
                     resultat.drop(columns=['Start_dt', 'Slut_dt', 'Lærer_Visning'], errors='ignore').to_excel(writer, sheet_name='Rådata', index=False)
-                    
-                    # Lærer ark
                     pivot_lær.fillna("").to_excel(writer, sheet_name='Læreroversigt')
-                    
-                    # Elev ark (samlet)
                     elev_export = resultat.pivot(index=['Klasse','Elevnavn'], columns='Lærer_Visning', values='Start')
                     elev_export.fillna("").to_excel(writer, sheet_name='Elevoversigt')
                 
