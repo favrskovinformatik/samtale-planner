@@ -27,7 +27,6 @@ st.set_page_config(page_title="Samtaleplanlægger", layout="wide", page_icon="�
 st.markdown("""
 <style>
     [data-testid="stSidebar"] { min-width: 450px !important; }
-    /* Sikrer at labels ikke knækker uhensigtsmæssigt */
     .stTextInput label, .stTextArea label, .stNumberInput label { 
         white-space: nowrap !important; 
         font-weight: bold; 
@@ -44,7 +43,6 @@ st.sidebar.header("1. Indstillinger")
 
 col1, col2 = st.sidebar.columns(2)
 with col1:
-    # Rettet: Bruger nu punktum i label og default value for at undgå visningsfejl
     start_tid_input = st.text_input("Starttidspunkt (tt.mm)", value="08.00")
 with col2:
     varighed = st.number_input("Varighed (min)", value=10, step=5)
@@ -60,24 +58,22 @@ lokale_str = st.sidebar.text_area("Lokaler (komma-separeret)",
 st.sidebar.markdown("---")
 st.sidebar.header("3. Specifikke ønsker")
 st.sidebar.info("Lås starttider her. Brug punktum i tiderne.")
-# Rettet: Eksempler bruger nu punktum
 specifikke_tider_raw = st.sidebar.text_area(
     "Låste tider (Format: ID=tt.mm)",
-    placeholder="AB=09.00\\n1a05=08.30",
+    placeholder="AB=09.00\\n1q 18=08.30",
     height=150
 )
 
 # --- HJÆLPEFUNKTIONER ---
 
 def parse_tider(text_input):
-    """Omdanner tekstinput til dictionary, håndterer både . og :"""
+    """Omdanner tekstinput til dictionary"""
     låste_tider = {}
     if not text_input: return låste_tider
     for line in text_input.split('\\n'):
         if '=' in line:
             parts = line.split('=')
             key = parts[0].strip()
-            # Erstat punktum med kolon så Python forstår det internt
             time_val = parts[1].strip().replace('.', ':')
             låste_tider[key] = time_val
     return låste_tider
@@ -85,8 +81,8 @@ def parse_tider(text_input):
 def get_template():
     """Genererer en tom Excel-skabelon"""
     df_temp = pd.DataFrame(columns=["Elevnavn", "Elevid", "Ønsker"])
-    df_temp.loc[0] = ["Jens Jensen", "1a01", "AB, CD"]
-    df_temp.loc[1] = ["Ulla Hansen", "1a02", "EF, AB"]
+    df_temp.loc[0] = ["Jens Jensen", "1q 18", "CA samfundsfag, AB historie"]
+    df_temp.loc[1] = ["Ulla Hansen", "1q 19", "LI dansk, CA samfundsfag"]
     
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -101,19 +97,28 @@ def sorter_lokaler(lokaler_liste):
 
 def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffer_min):
     try:
-        # Håndter punktum i starttid
         start_dt = datetime.strptime(start_str.replace('.', ':'), "%H:%M")
         
         # 1. RENS DATA
+        # Sikrer at Elevid er tekst (håndterer "1q 18")
         df['Elevid'] = df['Elevid'].astype(str).str.strip()
+        # Antager at klassen er de to første tegn (f.eks. "1q")
         df['Klasse'] = df['Elevid'].str[:2]
         
         samtaler = []
         lærer_klasser = {} 
         
         for _, row in df.iterrows():
-            ønsker = [x.strip() for x in str(row['Ønsker']).split(',') if x.strip()]
-            for lær in ønsker:
+            # Split først ved komma
+            rå_ønsker = [x.strip() for x in str(row['Ønsker']).split(',') if x.strip()]
+            
+            for item in rå_ønsker:
+                # NYT: Split ved mellemrum og tag første del (fjerner fag)
+                # "CA samfundsfag" -> "CA"
+                dele = item.split()
+                if not dele: continue
+                lær = dele[0]
+                
                 samtaler.append({
                     'Elevnavn': row['Elevnavn'],
                     'Elevid': row['Elevid'],
@@ -124,6 +129,9 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
                 lærer_klasser[lær].append(row['Klasse'])
         
         df_samtaler = pd.DataFrame(samtaler)
+        if df_samtaler.empty:
+            return "Ingen gyldige ønsker fundet i filen."
+
         alle_lærere = df_samtaler['Lærer'].unique()
         alle_elever = df_samtaler['Elevid'].unique()
 
@@ -192,7 +200,7 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
             lærer_til_lokale[lær] = valgt_lokale if valgt_lokale else "MGL. LOKALE"
 
         res_df['Lokale'] = res_df['Lærer'].map(lærer_til_lokale)
-        res_df['Start'] = res_df['Start_dt'].dt.strftime("%H:%M") # Output format
+        res_df['Start'] = res_df['Start_dt'].dt.strftime("%H:%M")
         
         return res_df.sort_values(['Klasse', 'Elevnavn', 'Start_dt'])
 
@@ -201,22 +209,18 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
 
 # --- UI VISNING ---
 
-# NYT: Tydelig instruktion om Excel-format
 st.markdown("### 📋 Krav til Excel-filen")
 st.info("""
-For at systemet virker, **skal** din Excel-fil indeholde præcis disse 3 kolonner i række 1:
-
-1.  **Elevnavn** (Tekst, f.eks. "Jens Hansen")
-2.  **Elevid** (Unikt ID, f.eks. "1a01" eller "Jensen")
-3.  **Ønsker** (Komma-separerede initialer, f.eks. "AB, CD, EF")
-
-*Tip: Andre kolonner i arket bliver ignoreret.*
+Filen skal indeholde disse 3 kolonner:
+1. **Elevnavn**
+2. **Elevid** (Accepterer tekst som "1q 18")
+3. **Ønsker** (Format: "CA samfundsfag, LI dansk" -> Koden bruger kun "CA" og "LI")
 """)
 
 col_upload, col_dl_temp = st.columns([3, 1])
 with col_dl_temp:
-    st.markdown("<br><br>", unsafe_allow_html=True) # Spacer
-    st.download_button("📥 Hent Skabelon", data=get_template(), file_name="skabelon_samtaler.xlsx", help="Hent en tom Excel-fil der er klar til udfyldelse.")
+    st.markdown("<br><br>", unsafe_allow_html=True) 
+    st.download_button("📥 Hent Skabelon", data=get_template(), file_name="skabelon_samtaler.xlsx")
 
 with col_upload:
     uploaded_file = st.file_uploader("Upload din Excel-fil her", type=["xlsx"])
@@ -225,15 +229,12 @@ if uploaded_file:
     try:
         df_input = pd.read_excel(uploaded_file)
         
-        # TJEK KOLONNER
         krævede_kolonner = ['Elevnavn', 'Elevid', 'Ønsker']
         mangler = [col for col in krævede_kolonner if col not in df_input.columns]
         
         if mangler:
-            st.error(f"❌ Fejl: Din fil mangler følgende kolonner: {', '.join(mangler)}")
-            st.markdown("Se venligst vejledningen ovenfor eller hent skabelonen.")
+            st.error(f"❌ Fejl: Din fil mangler kolonnerne: {', '.join(mangler)}")
         else:
-            # KØR BEREGNING
             tider_dict = parse_tider(specifikke_tider_raw)
             resultat = beregn_plan(
                 df_input, 
@@ -245,21 +246,18 @@ if uploaded_file:
             )
             
             if isinstance(resultat, str):
-                st.error(f"Der skete en fejl under beregningen: {resultat}")
+                st.error(f"Fejl: {resultat}")
             else:
                 st.success("✅ Planlægningen er færdig!")
                 
-                # --- VIS RESULTATER ---
                 tab1, tab2 = st.tabs(["👨‍🏫 Læreroversigt", "🎓 Elevoversigt"])
                 resultat['Lærer_Visning'] = resultat['Lærer'] + " (" + resultat['Lokale'] + ")"
                 
                 with tab1:
-                    st.markdown("**Lærernes tidsplan (Lokaler i parentes)**")
                     pivot_lær = resultat.pivot(index='Start', columns='Lærer_Visning', values='Elevid')
                     st.dataframe(pivot_lær.fillna(""), use_container_width=True)
                 
                 with tab2:
-                    st.markdown("**Elevernes tidsplan**")
                     klasser = sorted(resultat['Klasse'].unique())
                     for k in klasser:
                         with st.expander(f"Klasse {k}", expanded=False):
@@ -267,7 +265,6 @@ if uploaded_file:
                             pivot_elev = df_k.pivot(index='Elevnavn', columns='Lærer_Visning', values='Start')
                             st.dataframe(pivot_elev.fillna(""), use_container_width=True)
 
-                # --- EXCEL EXPORT ---
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     resultat.drop(columns=['Start_dt', 'Slut_dt', 'Lærer_Visning'], errors='ignore').to_excel(writer, sheet_name='Rådata', index=False)
@@ -284,7 +281,7 @@ if uploaded_file:
                 )
 
     except Exception as e:
-        st.error(f"Kunne ikke læse filen. Er det en gyldig Excel-fil? Fejl: {e}")
+        st.error(f"Kunne ikke læse filen: {e}")
 `
         },
       });
