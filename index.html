@@ -84,16 +84,15 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
         lærer_fri = {l: start_dt for l in alle_lærere}
         elev_fri = {e: start_dt for e in alle_elever}
         
-        # 1. Prioritet: Låste tider
+        # Sæt obligatoriske tider
         for key, t_str in spec_tider_dict.items():
             t_dt = datetime.strptime(t_str, "%H:%M")
             if key in lærer_fri: lærer_fri[key] = t_dt
             if key in elev_fri: elev_fri[key] = t_dt
 
-        # 2. Prioritet: Elev-kontinuitet. 
-        # Vi sorterer elever, så dem med låste tider kommer først, derefter resten.
-        elever_låst = [e for e in alle_elever if e in spec_tider_dict]
-        elever_rest = [e for e in alle_elever if e not in elever_låst]
+        # RETTELSE: Sorter elever så KUN den specifikke elev rykkes frem
+        elever_låst = sorted([e for e in alle_elever if e in spec_tider_dict])
+        elever_rest = sorted([e for e in alle_elever if e not in elever_låst])
         prioriteret_elev_rækkefølge = elever_låst + elever_rest
 
         færdig_plan = []
@@ -113,7 +112,7 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
 
         res_df = pd.DataFrame(færdig_plan)
         
-        # LOKALE TILDELING (stabil kronologisk tildeling)
+        # LOKALE TILDELING
         lokaler = [l.strip() for l in lokaler_raw.split(',') if l.strip()]
         lærer_blokke = res_df.groupby('Lærer').agg(Min_Start=('Start_dt', 'min'), Max_Slut=('Slut_dt', 'max')).reset_index().sort_values('Min_Start')
         
@@ -135,7 +134,6 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
         res_df['Lokale'] = res_df['Lærer'].map(lærer_til_lokale)
         res_df['Start'] = res_df['Start_dt'].dt.strftime("%H:%M")
         
-        # Ændring 2: Ventetidstjek
         ventetid_advarsler = []
         for e_id in alle_elever:
             e_plan = res_df[res_df['Elevid'] == e_id].sort_values('Start_dt')
@@ -152,7 +150,7 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
 
     except Exception as e: return str(e), {}, []
 
-# --- EXCEL --- (Samme som før)
+# --- EXCEL ---
 def generate_excel_elev(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -189,19 +187,12 @@ if uploaded_file:
         else:
             sidste = res.sort_values('Start_dt').iloc[-1]
             if any(res['Lokale'] == "⚠️ MANGLER LOKALE"): st.error("⚠️ MANGEL PÅ LOKALER!")
-            
             st.success(f"Færdig! Sidste samtale slutter kl. {sidste['Slut_dt'].strftime('%H:%M')} ({sidste['Lærer']}).")
-            
-            # Advarsler om ventetid
             if advarsler:
                 with st.expander("⚠️ Advarsler om ventetid (> 20 min)"):
-                    for a in advarsler:
-                        st.write(f"- {a}")
-
-            # Delte lokaler
+                    for a in advarsler: st.write(f"- {a}")
             delte = [f"{lok} ({', '.join([str(b) for b in br if pd.notna(b)])})" for lok, br in lok_brug.items() if len([b for b in br if pd.notna(b)]) > 1]
             if delte: st.warning(f"ℹ️ Delte lokaler: {'; '.join(delte)}")
-            
             c1, c2 = st.columns(2)
             c1.download_button("📥 Hent Elevoversigt", data=generate_excel_elev(res), file_name="Elevoversigt.xlsx")
             c2.download_button("📥 Hent Læreroversigt", data=generate_excel_laerer(res), file_name="Laereroversigt.xlsx")
