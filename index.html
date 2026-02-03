@@ -71,10 +71,12 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
         df['Klasse'] = df['Elevid'].str[:2]
         
         samtaler = []
+        elev_ønske_antal = {}
         for idx, row in df.iterrows():
             rå_ønsker = [x.strip() for x in str(row['Ønsker']).split(',') if x.strip()]
-            for item in rå_ønsker:
-                lær = item.split()[0]
+            lærere = [item.split()[0] for item in rå_ønsker]
+            elev_ønske_antal[row['Elevid']] = len(lærere)
+            for lær in lærere:
                 samtaler.append({'Elevnavn': row['Elevnavn'], 'Elevid': row['Elevid'], 'Lærer': lær, 'Klasse': row['Klasse']})
         
         df_samtaler = pd.DataFrame(samtaler)
@@ -90,25 +92,48 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
             if key in lærer_fri: lærer_fri[key] = t_dt
             if key in elev_fri: elev_fri[key] = t_dt
 
-        # RETTELSE: Sorter elever så KUN den specifikke elev rykkes frem
-        elever_låst = sorted([e for e in alle_elever if e in spec_tider_dict])
-        elever_rest = sorted([e for e in alle_elever if e not in elever_låst])
-        prioriteret_elev_rækkefølge = elever_låst + elever_rest
+        # STRATEGISK SORTERING:
+        # 1. Elever med låste tider.
+        # 2. Elever med FLEST samtaler (de sværeste brikker).
+        def sort_key(e_id):
+            is_locked = 0 if e_id in spec_tider_dict else 1
+            num_wishes = elev_ønske_antal.get(e_id, 0)
+            return (is_locked, -num_wishes, e_id)
+
+        prioriteret_elev_rækkefølge = sorted(alle_elever, key=sort_key)
 
         færdig_plan = []
         for e_id in prioriteret_elev_rækkefølge:
             mine_ønsker = df_samtaler[df_samtaler['Elevid'] == e_id]
-            for _, r in mine_ønsker.iterrows():
-                lær = r['Lærer']
-                st_tid = max(lærer_fri[lær], elev_fri[e_id])
+            
+            # For hver elev, planlæg deres samtaler i en rækkefølge der passer med lærernes ledighed
+            # Vi sorterer lærere for denne elev, så den lærer der er ledig først, tages først
+            mine_lærere = mine_ønsker['Lærer'].tolist()
+            
+            while mine_lærere:
+                # Find hvilken af elevens ønskede lærere der er ledig tidligst
+                bedste_lær = None
+                tidligste_mulige = datetime.max
+                
+                for l in mine_lærere:
+                    mulig_start = max(lærer_fri[l], elev_fri[e_id])
+                    if mulig_start < tidligste_mulige:
+                        tidligste_mulige = mulig_start
+                        bedste_lær = l
+                
+                # Book samtalen
+                st_tid = tidligste_mulige
                 sl_tid = st_tid + timedelta(minutes=varighed_min)
                 
+                info = mine_ønsker[mine_ønsker['Lærer'] == bedste_lær].iloc[0]
                 færdig_plan.append({
-                    'Elevnavn': r['Elevnavn'], 'Elevid': e_id, 'Klasse': r['Klasse'], 
-                    'Lærer': lær, 'Start_dt': st_tid, 'Slut_dt': sl_tid
+                    'Elevnavn': info['Elevnavn'], 'Elevid': e_id, 'Klasse': info['Klasse'], 
+                    'Lærer': bedste_lær, 'Start_dt': st_tid, 'Slut_dt': sl_tid
                 })
-                lærer_fri[lær] = sl_tid
+                
+                lærer_fri[bedste_lær] = sl_tid
                 elev_fri[e_id] = sl_tid
+                mine_lærere.remove(bedste_lær)
 
         res_df = pd.DataFrame(færdig_plan)
         
