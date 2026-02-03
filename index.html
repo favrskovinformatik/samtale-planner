@@ -28,10 +28,31 @@ st.markdown("""
 <style>
     [data-testid="stSidebar"] { min-width: 450px !important; }
     .stTextInput label, .stTextArea label, .stNumberInput label { font-weight: bold; }
+    .example-table { margin-bottom: 20px; border-collapse: collapse; width: 100%; }
+    .example-table td, .example-table th { border: 1px solid #ddd; padding: 8px; font-size: 0.9em; }
+    .example-table th { background-color: #f2f2f2; text-align: left; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🗓️ Samtaleplanlægger")
+
+# --- INSTRUKTION OG EKSEMPEL ---
+st.info("### 1. Forbered din Excel-fil")
+st.markdown("""
+Sørg for at din Excel-fil har præcis disse tre kolonneoverskrifter. Her er et eksempel på, hvordan en række skal se ud:
+""")
+
+# Visuel tabel-eksempel med Jonas Petersen
+example_data = {
+    "Elevnavn": ["Jonas Petersen"],
+    "Elevid": ["1x 07"],
+    "Ønsker": ["AG samfundsfag, FH biologi, FH idræt"]
+}
+st.table(pd.DataFrame(example_data))
+
+st.markdown("---")
+
+
 
 # --- SIDEBAR ---
 st.sidebar.header("1. Indstillinger")
