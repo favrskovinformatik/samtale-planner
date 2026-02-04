@@ -23,7 +23,7 @@ import io
 
 st.set_page_config(page_title="Samtaleplanlægger", layout="wide", page_icon="🗓️")
 
-# --- UI STYLING (DET ORIGINALE LAYOUT) ---
+# --- UI STYLING (LAYOUT TILBAGE TIL ORIGINAL) ---
 st.markdown("""
 <style>
     [data-testid="stSidebar"] { min-width: 450px !important; }
@@ -36,18 +36,22 @@ st.markdown("""
 
 st.title("🗓️ Samtaleplanlægger")
 
-# --- INSTRUKTION OG EKSEMPEL (GENDANNET) ---
+# --- INSTRUKTION OG EKSEMPEL ---
 st.info("### 1. Forbered din Excel-fil")
 st.markdown("""
-Sørg for at dit regneark har præcis disse tre kolonneoverskrifter. Her er et eksempel:
+Sørg for at dit regneark har præcis disse tre kolonneoverskrifter. Her er et eksempel på, hvordan en række skal se ud:
 """)
 
 example_data = {
     "Elevnavn": ["Jonas Petersen"],
     "Elevid": ["1x 07"],
-    "Ønsker": ["AG samfundsfag, SR, FH biologi"]
+    "Ønsker": ["AG samfundsfag, SR, FH biologi, FH idræt, GU"]
 }
 st.table(pd.DataFrame(example_data))
+
+st.markdown("""
+Regnearket kan godt have flere kolonner, men de bliver ignoreret. Det samme gælder fagene - det er kun initialerne, som programmet bruger.
+""")
 
 # --- SIDEBAR ---
 st.sidebar.header("1. Indstillinger")
@@ -62,9 +66,9 @@ lokale_str = st.sidebar.text_area("Lokaler (komma-separeret)", value=default_lok
 
 st.sidebar.markdown("---")
 st.sidebar.header("3. Specifikke ønsker")
-specifikke_tider_raw = st.sidebar.text_area("Vejledninger (Format: ID=tt.mm)", placeholder="1u 05=19.30\\nLE=17.00")
+specifikke_tider_raw = st.sidebar.text_area("Vejledninger for specifikke lærere og elever planlægges fra dette tidspunkt (Format: ID=tt.mm)", placeholder="AB=17.30\\n1q 18=17.00")
 
-# --- LOGIK: BALANCERET ENGINE ---
+# --- LOGIK ---
 def parse_tider(text_input):
     låste_tider = {}
     if not text_input: return låste_tider
@@ -92,11 +96,9 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
                     opgaver.append({'Elevid': row['Elevid'], 'Elevnavn': row['Elevnavn'], 'Lærer': parts[0], 'Klasse': row['Klasse']})
         
         res_df = pd.DataFrame(opgaver)
-        res_df['Start_dt'] = None
-        res_df['Slut_dt'] = None
-        
         alle_lærere = res_df['Lærer'].unique()
         alle_elever = res_df['Elevid'].unique()
+        
         lærer_nøgle_tider = {l: global_start for l in alle_lærere}
         elev_nøgle_tider = {e: [] for e in alle_elever}
         
@@ -106,24 +108,23 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
             except: pass
 
         resterende_indices = list(res_df.index)
-        # Prioriter elever med flest samtaler for at undgå at de bliver spredt
         resterende_indices.sort(key=lambda i: -len(res_df[res_df['Elevid'] == res_df.loc[i, 'Elevid']]))
 
+        planlagte_tider = []
+        
         while resterende_indices:
             bedste_score = float('inf')
             bedste_idx = -1
             bedste_tid = None
             
-            for idx in resterende_indices[:40]: # Tjek de næste 40 mulige
+            for idx in resterende_indices[:40]:
                 lær = res_df.loc[idx, 'Lærer']
                 elev = res_df.loc[idx, 'Elevid']
                 
                 lær_klar = max(lærer_nøgle_tider[lær], spec_tider.get(lær, global_start))
                 e_klar = max(global_start, spec_tider.get(elev, global_start))
-                
                 test_tid = max(lær_klar, e_klar)
                 
-                # Undgå overlap for elev
                 find_tid = True
                 while find_tid:
                     overlap = False
@@ -134,16 +135,13 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
                             break
                     if not overlap: find_tid = False
                 
-                # Score-beregning (Balance)
                 l_gap = (test_tid - lærer_nøgle_tider[lær]).total_seconds() / 60
                 e_gap = 0
                 if elev_nøgle_tider[elev]:
                     afstande = [min(abs((test_tid - sl).total_seconds()/60), abs((st - (test_tid + timedelta(minutes=varighed_min))).total_seconds()/60)) for st, sl in elev_nøgle_tider[elev]]
                     e_gap = min(afstande)
                 
-                # Vi vægter elevens ventetid højt (2.0) for at holde deres program samlet
                 score = l_gap + (e_gap * 2.0)
-                
                 if score < bedste_score:
                     bedste_score = score
                     bedste_idx = idx
@@ -155,13 +153,16 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
             elev_nøgle_tider[res_df.loc[bedste_idx, 'Elevid']].append((bedste_tid, bedste_tid + timedelta(minutes=varighed_min)))
             resterende_indices.remove(bedste_idx)
 
+        # FIX: Sørg for at kolonnen er datetime før .dt tilgås
+        res_df['Start_dt'] = pd.to_datetime(res_df['Start_dt'])
+        res_df['Slut_dt'] = pd.to_datetime(res_df['Slut_dt'])
         res_df['Start'] = res_df['Start_dt'].dt.strftime("%H:%M")
         
-        # LOKALER
         lokaler = [l.strip() for l in lokaler_raw.split(',') if l.strip()]
         lokale_ledig_fra = {lok: global_start - timedelta(minutes=buffer_min) for lok in lokaler}
         lærer_til_lokale = {}
         lærer_blokke = res_df.groupby('Lærer').agg(Min_S=('Start_dt', 'min'), Max_S=('Slut_dt', 'max')).reset_index().sort_values('Min_S')
+        
         for _, row in lærer_blokke.iterrows():
             valgt_lok = next((lok for lok in lokaler if row['Min_S'] >= lokale_ledig_fra[lok] + timedelta(minutes=buffer_min)), None)
             if valgt_lok:
@@ -171,7 +172,6 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
 
         res_df['Lokale'] = res_df['Lærer'].map(lærer_til_lokale)
         
-        # Statistik
         pauser_l = []
         for lær in alle_lærere:
             l_p = res_df[res_df['Lærer'] == lær].sort_values('Start_dt')
@@ -189,7 +189,7 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
         return res_df, advarsler, avg_l
     except Exception as e: return str(e), [], 0
 
-# --- DOWNLOAD FUNKTIONER ---
+# --- EXCEL ---
 def generate_excel_elev(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -214,22 +214,21 @@ def generate_excel_laerer(df):
             ws.write(0, 0, f"Lærer: {lær}"); ws.write(1, 0, f"Lokale: {df_l['Lokale'].iloc[0]}")
     return output.getvalue()
 
-uploaded_file = st.file_uploader("Upload din Excel-fil her", type=["xlsx"])
+uploaded_file = st.file_uploader("Upload Excel med de korrekte kolonner", type=["xlsx"])
 if uploaded_file:
     df_in = pd.read_excel(uploaded_file)
     if all(col in df_in.columns for col in ['Elevnavn', 'Elevid', 'Ønsker']):
         res, adv, avg_l = beregn_plan(df_in, start_tid_input, lokale_str, parse_tider(specifikke_tider_raw), varighed, lokale_buffer)
         if isinstance(res, str): st.error(res)
         else:
-            st.success(f"Planen er klar!")
+            st.success(f"Færdig!")
             st.write(f"📊 **Gennemsnitlig ventetid for lærere:** {avg_l:.1f} min.")
             if adv:
-                with st.expander(f"⚠️ {len(adv)} elever har ventetid over 20 min"):
+                with st.expander("⚠️ Ventetider over 20 minutter for elever"):
                     for a in adv: st.write(f"- {a}")
             c1, c2 = st.columns(2)
             c1.download_button("📥 Hent Elevoversigt", data=generate_excel_elev(res), file_name="Elevoversigt.xlsx")
             c2.download_button("📥 Hent Læreroversigt", data=generate_excel_laerer(res), file_name="Laereroversigt.xlsx")
-    else: st.error("Excel-filen mangler de korrekte kolonner: 'Elevnavn', 'Elevid' og 'Ønsker'")
 `
         },
       });
