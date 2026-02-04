@@ -39,18 +39,20 @@ st.title("🗓️ Samtaleplanlægger")
 # --- INSTRUKTION OG EKSEMPEL ---
 st.info("### 1. Forbered din Excel-fil")
 st.markdown("""
-Sørg for at din Excel-fil har præcis disse tre kolonneoverskrifter. Her er et eksempel på, hvordan en række skal se ud:
+Sørg for at dit regneark har præcis disse tre kolonneoverskrifter. Her er et eksempel på, hvordan en række kan se ud:
 """)
 
 # Visuel tabel-eksempel med Jonas Petersen
 example_data = {
     "Elevnavn": ["Jonas Petersen"],
     "Elevid": ["1x 07"],
-    "Ønsker": ["AG samfundsfag, FH biologi, FH idræt"]
+    "Ønsker": ["AG samfundsfag, SR, FH biologi, FH idræt, GU"]
 }
 st.table(pd.DataFrame(example_data))
 
-st.markdown("---")
+st.markdown("""
+Regnearket kan godt have flere kolonner, men de bliver ignoreret. Det samme gælder fagene - det er kun initialerne, som programmet bruger.
+""")
 
 # --- SIDEBAR ---
 st.sidebar.header("1. Indstillinger")
