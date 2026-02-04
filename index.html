@@ -39,7 +39,7 @@ st.title("🗓️ Samtaleplanlægger")
 # --- INSTRUKTION OG EKSEMPEL ---
 st.info("### 1. Forbered din Excel-fil")
 st.markdown("""
-Sørg for at dit regneark har præcis disse tre kolonneoverskrifter. Her er et eksempel på, hvordan en række kan se ud:
+Sørg for at dit regneark har præcis disse tre kolonneoverskrifter. Her er et eksempel på, hvordan en række skal se ud:
 """)
 
 # Visuel tabel-eksempel med Jonas Petersen
@@ -108,7 +108,6 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
         lærer_fri = {l: start_dt for l in alle_lærere}
         elev_fri = {e: start_dt for e in alle_elever}
         
-        # Påfør låste tider
         for k, v in spec_tider_dict.items():
             t = datetime.strptime(v, "%H:%M")
             if k in lærer_fri: lærer_fri[k] = t
@@ -117,7 +116,7 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
         færdig_plan = []
         resterende = df_samtaler.copy()
         
-        # Prioriter lærere (låste først, derefter dem med flest samtaler)
+        # Prioriter lærere: Flest samtaler først for at skabe en stabil ramme
         lærer_prioritet = sorted(alle_lærere, key=lambda x: (0 if x in spec_tider_dict else 1, -len(df_samtaler[df_samtaler['Lærer']==x])))
 
         for lær in lærer_prioritet:
@@ -125,21 +124,28 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
                 mine_elever = resterende[resterende['Lærer'] == lær]
                 if mine_elever.empty: break
                 
-                # SIKRINGS-LOGIK: Find elev der er ledig med under 20 min ventetid
                 bedste_elev_idx = -1
                 tidligste_start = datetime.max
                 
-                # 1. Forsøg først at finde et match med UNDER 20 min ventetid for eleven
+                # OPTIMERET LOGIK (KOMPAKT LÆRER + KOMPAKT ELEV):
+                # Vi leder efter en elev, der er ledig tæt på lærerens nuværende sluttid
                 for idx, row in mine_elever.iterrows():
                     e = row['Elevid']
                     mulig_start = max(lærer_fri[lær], elev_fri[e])
-                    ventetid = (mulig_start - elev_fri[e]).total_seconds() / 60
                     
-                    if ventetid <= 20 and mulig_start < tidligste_start:
-                        tidligste_start = mulig_start
-                        bedste_elev_idx = idx
+                    # 1. Prioritet: Elevens ventetid skal være under 20 min
+                    # 2. Prioritet: Lærerens pause skal være så lille som muligt
+                    ventetid_elev = (mulig_start - elev_fri[e]).total_seconds() / 60
+                    pause_laerer = (mulig_start - lærer_fri[lær]).total_seconds() / 60
+                    
+                    if ventetid_elev <= 20:
+                        # Hvis flere elever er ledige, vælg den der minimerer lærerens pause
+                        if mulig_start < tidligste_start:
+                            tidligste_start = mulig_start
+                            bedste_elev_idx = idx
                 
-                # 2. Hvis ingen passer i 20-min vinduet, tag den der trods alt er ledig tidligst
+                # Hvis ingen elever passer ind i 20-minutters vinduet for læreren,
+                # må vi acceptere et større hul, men vælger stadig den tidligste mulige
                 if bedste_elev_idx == -1:
                     for idx, row in mine_elever.iterrows():
                         e = row['Elevid']
@@ -190,8 +196,7 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
         return res_df, advarsler
     except Exception as e: return str(e), []
 
-# --- EXCEL GENERERING ---
-
+# --- EXCEL GENERERING (Uændret) ---
 def generate_excel_elev(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -219,7 +224,7 @@ def generate_excel_laerer(df):
     return output.getvalue()
 
 # --- APP FLOW ---
-uploaded_file = st.file_uploader("Upload Excel med disse kolonneoverskrifter: 'Elevnavn', 'Elevid', 'Ønsker' - andre kolonner ignoreres", type=["xlsx"])
+uploaded_file = st.file_uploader("Upload Excel med de korrekte kolonner", type=["xlsx"])
 if uploaded_file:
     df_in = pd.read_excel(uploaded_file)
     if all(col in df_in.columns for col in ['Elevnavn', 'Elevid', 'Ønsker']):
