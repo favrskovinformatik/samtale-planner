@@ -31,6 +31,7 @@ st.markdown("""
     .example-table { margin-bottom: 20px; border-collapse: collapse; width: 100%; }
     .example-table td, .example-table th { border: 1px solid #ddd; padding: 8px; font-size: 0.9em; }
     .example-table th { background-color: #f2f2f2; text-align: left; }
+    .stat-box { background-color: #f0f2f6; padding: 20px; border-radius: 10px; border-left: 5px solid #0078ff; margin-bottom: 20px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -116,7 +117,7 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
         færdig_plan = []
         resterende = df_samtaler.copy()
         
-        # Prioriter lærere: Flest samtaler først for at skabe en stabil ramme
+        # Prioritering: Lærere med flest samtaler først for at 'låse' de store blokke tidligt
         lærer_prioritet = sorted(alle_lærere, key=lambda x: (0 if x in spec_tider_dict else 1, -len(df_samtaler[df_samtaler['Lærer']==x])))
 
         for lær in lærer_prioritet:
@@ -127,25 +128,17 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
                 bedste_elev_idx = -1
                 tidligste_start = datetime.max
                 
-                # OPTIMERET LOGIK (KOMPAKT LÆRER + KOMPAKT ELEV):
-                # Vi leder efter en elev, der er ledig tæt på lærerens nuværende sluttid
+                # Gravity-logik: Vi leder efter elev, der kan starte tættest på lærerens forrige samtale
                 for idx, row in mine_elever.iterrows():
                     e = row['Elevid']
                     mulig_start = max(lærer_fri[lær], elev_fri[e])
-                    
-                    # 1. Prioritet: Elevens ventetid skal være under 20 min
-                    # 2. Prioritet: Lærerens pause skal være så lille som muligt
                     ventetid_elev = (mulig_start - elev_fri[e]).total_seconds() / 60
-                    pause_laerer = (mulig_start - lærer_fri[lær]).total_seconds() / 60
                     
                     if ventetid_elev <= 20:
-                        # Hvis flere elever er ledige, vælg den der minimerer lærerens pause
                         if mulig_start < tidligste_start:
                             tidligste_start = mulig_start
                             bedste_elev_idx = idx
                 
-                # Hvis ingen elever passer ind i 20-minutters vinduet for læreren,
-                # må vi acceptere et større hul, men vælger stadig den tidligste mulige
                 if bedste_elev_idx == -1:
                     for idx, row in mine_elever.iterrows():
                         e = row['Elevid']
@@ -165,6 +158,15 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
 
         res_df = pd.DataFrame(færdig_plan)
         
+        # Beregn pauser for statusmeddelelse
+        pauser = []
+        for lær in alle_lærere:
+            l_p = res_df[res_df['Lærer'] == lær].sort_values('Start_dt')
+            if len(l_p) > 1:
+                for i in range(len(l_p)-1):
+                    pauser.append((l_p.iloc[i+1]['Start_dt'] - l_p.iloc[i]['Slut_dt']).total_seconds() / 60)
+        avg_p = sum(pauser) / len(pauser) if pauser else 0
+
         # --- LOKALER ---
         lokaler = [l.strip() for l in lokaler_raw.split(',') if l.strip()]
         lærer_blokke = res_df.groupby('Lærer').agg(Min_Start=('Start_dt', 'min'), Max_Slut=('Slut_dt', 'max')).reset_index().sort_values('Min_Start')
@@ -184,7 +186,6 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
         res_df['Lokale'] = res_df['Lærer'].map(lærer_til_lokale)
         res_df['Start'] = res_df['Start_dt'].dt.strftime("%H:%M")
         
-        # --- VENTETIDSTJEK ---
         advarsler = []
         for e in alle_elever:
             e_p = res_df[res_df['Elevid'] == e].sort_values('Start_dt')
@@ -193,10 +194,11 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
                 if gap > 20:
                     advarsler.append(f"{e_p.iloc[0]['Elevnavn']} ({e}): {int(gap)} min")
                     
-        return res_df, advarsler
-    except Exception as e: return str(e), []
+        return res_df, advarsler, avg_p
+    except Exception as e: return str(e), [], 0
 
-# --- EXCEL GENERERING (Uændret) ---
+# --- EXCEL GENERERING ---
+
 def generate_excel_elev(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -224,11 +226,11 @@ def generate_excel_laerer(df):
     return output.getvalue()
 
 # --- APP FLOW ---
-uploaded_file = st.file_uploader("Upload Excel med de korrekte kolonner", type=["xlsx"])
+uploaded_file = st.file_uploader("Upload Excel med disse kolonneoverskrifter: 'Elevnavn', 'Elevid', 'Ønsker'", type=["xlsx"])
 if uploaded_file:
     df_in = pd.read_excel(uploaded_file)
     if all(col in df_in.columns for col in ['Elevnavn', 'Elevid', 'Ønsker']):
-        res, adv = beregn_plan(df_in, start_tid_input, lokale_str, parse_tider(specifikke_tider_raw), varighed, lokale_buffer)
+        res, adv, avg_pause = beregn_plan(df_in, start_tid_input, lokale_str, parse_tider(specifikke_tider_raw), varighed, lokale_buffer)
         
         if isinstance(res, str):
             st.error(res)
@@ -236,11 +238,19 @@ if uploaded_file:
             sidste = res.sort_values('Start_dt').iloc[-1]
             st.success(f"Færdig! Sidste samtale kl. {sidste['Slut_dt'].strftime('%H:%M')}")
             
+            # Statusmeddelelse på forsiden
+            st.markdown(f"""
+            <div class="stat-box">
+                <h4>📊 Status på lærernes plan</h4>
+                Gennemsnitlig ventetid mellem samtaler: <b>{avg_pause:.1f} minutter</b>.
+            </div>
+            """, unsafe_allow_html=True)
+            
             if any(res['Lokale'] == "⚠️ MANGLER LOKALE"):
-                st.error("⚠️ LOKALEMANGEL! Prøv at tilføje flere lokaler eller reducere bufferen.")
+                st.error("⚠️ LOKALEMANGEL! Tilføj flere lokaler eller reducer bufferen.")
             
             if adv:
-                with st.expander("⚠️ Ventetider over 20 minutter"):
+                with st.expander("⚠️ Ventetider over 20 minutter for elever"):
                     for a in adv: st.write(f"- {a}")
             
             st.markdown("### Download resultater")
