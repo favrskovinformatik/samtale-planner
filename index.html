@@ -88,7 +88,8 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
         df['Elevid'] = df['Elevid'].astype(str).str.strip() 
         df['Klasse'] = df['Elevid'].str[:2] 
         
-        # Opbyg data-struktur
+        # 1. Kortlæg opgaver og beregn lærer-belastning (Heuristik)
+        opgaver_flat = []
         elever_data = {}
         for _, row in df.iterrows():
             wishes = [x.strip().split()[0] for x in str(row['Ønsker']).split(',') if x.strip()]
@@ -97,43 +98,45 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
                 'klasse': row['Klasse'],
                 'wishes': wishes
             }
+            for w in wishes:
+                opgaver_flat.append(w)
         
-        alle_lærere = list(set([w for s in elever_data.values() for w in s['wishes']]))
+        # Beregn hvor mange samtaler hver lærer har totalt
+        lærer_counts = pd.Series(opgaver_flat).value_counts().to_dict()
+        alle_lærere = list(lærer_counts.keys())
         lærer_fri = {l: global_start for l in alle_lærere}
         
-        # Parse specifikke tider
+        # 2. Parse specifikke tider
         spec_tider = {}
         for k, v in spec_tider_dict.items():
             try: spec_tider[k] = datetime.strptime(v, "%H:%M")
             except: pass
 
-        # Prioritering: Elever med flest ønsker først (de er sværest at få plads til)
+        # 3. Prioritering af elever: Dem med flest ønsker først
         sorted_e_ids = sorted(elever_data.keys(), key=lambda x: (-len(elever_data[x]['wishes']), x))
         
         færdig_plan = []
         
         for e_id in sorted_e_ids:
             e_info = elever_data[e_id]
-            wishes = e_info['wishes']
+            # Sorter elevens ønsker efter lærerens total-belastning (flaskehals-heuristik)
+            wishes_sorted = sorted(e_info['wishes'], key=lambda x: lærer_counts.get(x, 0), reverse=True)
             
-            # Find første ledige vindue for ELEV-KÆDEN (Brute force search)
             found = False
             search_start = max(global_start, spec_tider.get(e_id, global_start))
             
             while not found:
                 temp_bookings = []
+                # Vi sporer hvornår ELEVEN er ledig i denne specifikke test-kæde
                 current_e_time = search_start
                 possible = True
                 
-                # Sorter wishes for denne elev: tag den mest belastede lærer først i kæden
-                # (Dette er en vigtig heuristik for at undgå at blokere senere)
-                wishes_sorted = sorted(wishes, key=lambda x: len([e for e in elever_data.values() if x in e['wishes']]), reverse=True)
-                
                 for lær in wishes_sorted:
+                    # Læreren skal være ledig, og vi skal respektere lærerens specifikke start-tid
                     l_start_tidligst = max(current_e_time, lærer_fri[lær], spec_tider.get(lær, global_start))
                     
-                    # Tjek om ventetiden er over 20 min (hvis ikke det er første samtale)
-                    if len(temp_bookings) > 0:
+                    # Tjek for 20-minutters reglen (undtagen ved første samtale i kæden)
+                    if temp_bookings:
                         sidste_slut = max([b['Slut_dt'] for b in temp_bookings])
                         if (l_start_tidligst - sidste_slut).total_seconds() / 60 > 20:
                             possible = False
@@ -147,26 +150,22 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
                         'Start_dt': l_start_tidligst,
                         'Slut_dt': l_start_tidligst + timedelta(minutes=varighed_min)
                     })
-                    # Eleven kan starte næste samtale umiddelbart efter
+                    # Eleven er nu optaget indtil denne samtale slutter
                     current_e_time = l_start_tidligst + timedelta(minutes=varighed_min)
                 
                 if possible:
-                    # Book det!
                     for b in temp_bookings:
                         færdig_plan.append(b)
                         lærer_fri[b['Lærer']] = b['Slut_dt']
                     found = True
                 else:
-                    # Prøv at starte kæden 5 minutter senere
                     search_start += timedelta(minutes=5)
-                    if search_start > global_start + timedelta(hours=6):
-                        # Sikkerhedsventil
-                        break
+                    if search_start > global_start + timedelta(hours=6): break
 
         res_df = pd.DataFrame(færdig_plan)
         res_df['Start'] = res_df['Start_dt'].dt.strftime("%H:%M")
         
-        # Lokaler
+        # 4. Lokale-tildeling
         lokaler = [l.strip() for l in lokaler_raw.split(',') if l.strip()]
         lokale_ledig_fra = {lok: global_start - timedelta(minutes=buffer_min) for lok in lokaler}
         lærer_til_lokale = {}
@@ -181,7 +180,7 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
 
         res_df['Lokale'] = res_df['Lærer'].map(lærer_til_lokale)
         
-        # Statistik
+        # 5. Statistik & Advarsler
         pauser = []
         for lær in alle_lærere:
             l_p = res_df[res_df['Lærer'] == lær].sort_values('Start_dt')
@@ -199,7 +198,7 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
         return res_df, advarsler, avg_p
     except Exception as e: return str(e), [], 0
 
-# --- EXCEL FUNKTIONER (UÆNDRET) --- 
+# --- EXCEL FUNKTIONER --- 
 def generate_excel_elev(df): 
     output = io.BytesIO() 
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: 
