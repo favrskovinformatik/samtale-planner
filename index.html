@@ -109,8 +109,6 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
 
         færdig_plan = []
         resterende = df_opgaver.copy()
-        
-        # Sortér lærere efter belastning
         lærer_prioritet = sorted(alle_lærere, key=lambda x: -len(df_opgaver[df_opgaver['Lærer']==x]))
 
         # Fase 1: Grundlæggende tildeling
@@ -118,20 +116,16 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
             while True:
                 mine = resterende[resterende['Lærer'] == lær]
                 if mine.empty: break
-                
                 bedste_idx = -1
                 tidligste_start = datetime.max
-                
                 for idx, row in mine.iterrows():
                     e = row['Elevid']
                     mulig_start = max(lærer_fri[lær], elev_fri[e])
                     ventetid_elev = (mulig_start - elev_fri[e]).total_seconds() / 60
-                    
                     if ventetid_elev <= 20:
                         if mulig_start < tidligste_start:
                             tidligste_start = mulig_start
                             bedste_idx = idx
-                
                 if bedste_idx == -1:
                     for idx, row in mine.iterrows():
                         e = row['Elevid']
@@ -139,7 +133,6 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
                         if mulig_start < tidligste_start:
                             tidligste_start = mulig_start
                             bedste_idx = idx
-                
                 valgt = mine.loc[bedste_idx]
                 res_df_item = {**valgt.to_dict(), 'Start_dt': tidligste_start, 'Slut_dt': tidligste_start + timedelta(minutes=varighed_min)}
                 færdig_plan.append(res_df_item)
@@ -149,45 +142,39 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
 
         res_df = pd.DataFrame(færdig_plan)
 
-        # Fase 2: KOMPRIMERING MED 20-MINUTTERS TJEK
+        # Fase 2: AGGRESSIV KOMPRIMERING MOD LÆRERENS SLUTTID (uden at bryde 20-min reglen)
         for lær in alle_lærere:
-            l_idx = res_df[res_df['Lærer'] == lær].sort_values('Start_dt', ascending=False).index
-            if len(l_idx) < 2: continue
-            
-            for i in range(len(l_idx) - 1):
-                idx_nu = l_idx[i]
-                idx_forrige = l_idx[i+1]
-                ny_st = res_df.at[idx_nu, 'Start_dt'] - timedelta(minutes=varighed_min)
+            # Vi kører processen flere gange for at sikre, at alt "strammes op" så meget som muligt
+            for _ in range(3):
+                l_idx = res_df[res_df['Lærer'] == lær].sort_values('Start_dt', ascending=False).index
+                if len(l_idx) < 2: continue
                 
-                e_id = res_df.at[idx_forrige, 'Elevid']
-                
-                # Tjek elevens ventetid før flytning godkendes
-                e_skema = res_df[res_df['Elevid'] == e_id].sort_values('Start_dt')
-                e_aftaler_idx = list(e_skema.index)
-                pos = e_aftaler_idx.index(idx_forrige)
-                
-                v_ok = True
-                if pos > 0: # Gap til forrige
-                    gap_b = (ny_st - res_df.at[e_aftaler_idx[pos-1], 'Slut_dt']).total_seconds() / 60
-                    if gap_b > 20 or gap_b < 0: v_ok = False
-                if pos < len(e_aftaler_idx) - 1: # Gap til næste
-                    gap_f = (res_df.at[e_aftaler_idx[pos+1], 'Start_dt'] - (ny_st + timedelta(minutes=varighed_min))).total_seconds() / 60
-                    if gap_f > 20 or gap_f < 0: v_ok = False
+                for i in range(len(l_idx) - 1):
+                    idx_nu = l_idx[i]
+                    idx_forrige = l_idx[i+1]
+                    
+                    # Forsøg at trække 'forrige' samtale helt op til 'nu'-samtalens start
+                    ny_st = res_df.at[idx_nu, 'Start_dt'] - timedelta(minutes=varighed_min)
+                    if ny_st <= res_df.at[idx_forrige, 'Start_dt']: continue
+                    
+                    e_id = res_df.at[idx_forrige, 'Elevid']
+                    
+                    # Tjek om flyttet skaber huller > 20 min for eleven
+                    e_skema = res_df[res_df['Elevid'] == e_id].sort_values('Start_dt')
+                    e_aftaler_idx = list(e_skema.index)
+                    pos = e_aftaler_idx.index(idx_forrige)
+                    
+                    v_ok = True
+                    if pos > 0: # Check hul til elevens forrige samtale
+                        gap_b = (ny_st - res_df.at[e_aftaler_idx[pos-1], 'Slut_dt']).total_seconds() / 60
+                        if gap_b > 20 or gap_b < 0: v_ok = False
+                    if pos < len(e_aftaler_idx) - 1: # Check hul til elevens næste samtale
+                        gap_f = (res_df.at[e_aftaler_idx[pos+1], 'Start_dt'] - (ny_st + timedelta(minutes=varighed_min))).total_seconds() / 60
+                        if gap_f > 20 or gap_f < 0: v_ok = False
 
-                overlap = False
-                andre_e = res_df[(res_df['Elevid'] == e_id) & (res_df.index != idx_forrige)]
-                for _, aftale in andre_e.iterrows():
-                    if not (ny_st + timedelta(minutes=varighed_min) <= aftale['Start_dt'] or ny_st >= aftale['Slut_dt']):
-                        overlap = True
-                        break
-                
-                låst_tid_e = datetime.strptime(spec_tider_dict.get(e_id, "00:00"), "%H:%M") if e_id in spec_tider_dict else global_start
-                låst_tid_l = datetime.strptime(spec_tider_dict.get(lær, "00:00"), "%H:%M") if lær in spec_tider_dict else global_start
-                absolut_tidligst = max(global_start, låst_tid_e, låst_tid_l)
-
-                if v_ok and not overlap and ny_st >= absolut_tidligst:
-                    res_df.at[idx_forrige, 'Start_dt'] = ny_st
-                    res_df.at[idx_forrige, 'Slut_dt'] = ny_st + timedelta(minutes=varighed_min)
+                    if v_ok:
+                        res_df.at[idx_forrige, 'Start_dt'] = ny_st
+                        res_df.at[idx_forrige, 'Slut_dt'] = ny_st + timedelta(minutes=varighed_min)
 
         res_df['Start'] = res_df['Start_dt'].dt.strftime("%H:%M")
         
@@ -196,14 +183,12 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
         lokale_ledig_fra = {lok: global_start - timedelta(minutes=buffer_min) for lok in lokaler}
         lærer_til_lokale = {}
         lærer_blokke = res_df.groupby('Lærer').agg(Min_S=('Start_dt', 'min'), Max_S=('Slut_dt', 'max')).reset_index().sort_values('Min_S')
-        
         for _, row in lærer_blokke.iterrows():
             valgt_lok = next((lok for lok in lokaler if row['Min_S'] >= lokale_ledig_fra[lok] + timedelta(minutes=buffer_min)), None)
             if valgt_lok:
                 lærer_til_lokale[row['Lærer']] = valgt_lok
                 lokale_ledig_fra[valgt_lok] = row['Max_S']
             else: lærer_til_lokale[row['Lærer']] = "⚠️ MANGLER LOKALE"
-
         res_df['Lokale'] = res_df['Lærer'].map(lærer_til_lokale)
         
         # Pauser-statistik
