@@ -49,10 +49,6 @@ example_data = {
 }
 st.table(pd.DataFrame(example_data))
 
-st.markdown("""
-Regnearket kan godt have flere kolonner, men de bliver ignoreret. Det samme gælder fagene - det er kun initialerne, som programmet bruger.
-""")
-
 # --- SIDEBAR ---
 st.sidebar.header("1. Indstillinger")
 start_tid_input = st.sidebar.text_input("Starttidspunkt (tt.mm)", value="17.00")
@@ -110,9 +106,9 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
         færdig_plan = []
         resterende = df_opgaver.copy()
         
-        # 1. Grundlæggende tildeling (20-min regel som højeste prioritet)
         lærer_prioritet = sorted(alle_lærere, key=lambda x: -len(df_opgaver[df_opgaver['Lærer']==x]))
 
+        # Fase 1: Planlægning med direkte fokus på elev-kompakthed
         for lær in lærer_prioritet:
             while True:
                 mine = resterende[resterende['Lærer'] == lær]
@@ -121,18 +117,29 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
                 bedste_idx = -1
                 tidligste_start = datetime.max
                 
-                # Forsøg at finde en elev med < 20 min ventetid
+                # SØG efter elev der kan få et hul på 0 minutter (næste mulige tid)
                 for idx, row in mine.iterrows():
                     e = row['Elevid']
                     mulig_start = max(lærer_fri[lær], elev_fri[e])
-                    ventetid_elev = (mulig_start - elev_fri[e]).total_seconds() / 60
+                    ventetid_e = (mulig_start - elev_fri[e]).total_seconds() / 60
                     
-                    if ventetid_elev <= 20:
-                        if mulig_start < tidligste_start:
-                            tidligste_start = mulig_start
-                            bedste_idx = idx
+                    if ventetid_e == 0: # Perfekt match for eleven!
+                        tidligste_start = mulig_start
+                        bedste_idx = idx
+                        break 
                 
-                # Hvis ingen passer, tag den første ledige
+                # Hvis ingen 0-min huller, søg efter < 20 min
+                if bedste_idx == -1:
+                    for idx, row in mine.iterrows():
+                        e = row['Elevid']
+                        mulig_start = max(lærer_fri[lær], elev_fri[e])
+                        ventetid_e = (mulig_start - elev_fri[e]).total_seconds() / 60
+                        if ventetid_e <= 20:
+                            if mulig_start < tidligste_start:
+                                tidligste_start = mulig_start
+                                bedste_idx = idx
+
+                # Hvis stadig intet, tag den tidligste mulige
                 if bedste_idx == -1:
                     for idx, row in mine.iterrows():
                         e = row['Elevid']
@@ -142,73 +149,49 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
                             bedste_idx = idx
                 
                 valgt = mine.loc[bedste_idx]
-                res_df_item = {**valgt.to_dict(), 'Start_dt': tidligste_start, 'Slut_dt': tidligste_start + timedelta(minutes=varighed_min)}
-                færdig_plan.append(res_df_item)
-                lærer_fri[lær] = res_df_item['Slut_dt']
-                elev_fri[valgt['Elevid']] = res_df_item['Slut_dt']
+                item = {**valgt.to_dict(), 'Start_dt': tidligste_start, 'Slut_dt': tidligste_start + timedelta(minutes=varighed_min)}
+                færdig_plan.append(item)
+                lærer_fri[lær] = item['Slut_dt']
+                elev_fri[valgt['Elevid']] = item['Slut_dt']
                 resterende = resterende.drop(bedste_idx)
 
         res_df = pd.DataFrame(færdig_plan)
 
-        # 2. BALANCERET KOMPRIMERING (Kompakt lærer, men KUN hvis elevens ventetid forbliver <= 20 min)
+        # Fase 2: Let komprimering for lærere (kun hvis det ikke rører elevernes tider)
         for lær in alle_lærere:
             l_idx = res_df[res_df['Lærer'] == lær].sort_values('Start_dt', ascending=False).index
-            if len(l_idx) < 2: continue
-            
             for i in range(len(l_idx) - 1):
                 idx_nu = l_idx[i]
                 idx_forrige = l_idx[i+1]
-                
                 ny_st = res_df.at[idx_nu, 'Start_dt'] - timedelta(minutes=varighed_min)
+                
+                # Vi rykker kun hvis eleven er 100% ledig i det tidsrum
                 e_id = res_df.at[idx_forrige, 'Elevid']
-                
-                # Tjek elevens ventetider ved denne nye placering
-                e_skema = res_df[res_df['Elevid'] == e_id].sort_values('Start_dt')
-                e_aftaler_idx = list(e_skema.index)
-                pos = e_aftaler_idx.index(idx_forrige)
-                
-                ventetid_ok = True
-                if pos > 0: # Forrige samtale for elev
-                    f_slut = res_df.at[e_aftaler_idx[pos-1], 'Slut_dt']
-                    if (ny_st - f_slut).total_seconds() / 60 > 20: ventetid_ok = False
-                
-                if pos < len(e_aftaler_idx) - 1: # Næste samtale for elev
-                    n_start = res_df.at[e_aftaler_idx[pos+1], 'Start_dt']
-                    if (n_start - (ny_st + timedelta(minutes=varighed_min))).total_seconds() / 60 > 20: ventetid_ok = False
-
-                # Tjek overlap
                 overlap = False
                 andre_e = res_df[(res_df['Elevid'] == e_id) & (res_df.index != idx_forrige)]
                 for _, a in andre_e.iterrows():
                     if not (ny_st + timedelta(minutes=varighed_min) <= a['Start_dt'] or ny_st >= a['Slut_dt']):
                         overlap = True; break
-
-                låst_e = datetime.strptime(spec_tider_dict.get(e_id, "00:00"), "%H:%M") if e_id in spec_tider_dict else global_start
-                låst_l = datetime.strptime(spec_tider_dict.get(lær, "00:00"), "%H:%M") if lær in spec_tider_dict else global_start
-                absolut_min = max(global_start, låst_e, låst_l)
-
-                if ventetid_ok and not overlap and ny_st >= absolut_min:
+                
+                if not overlap and ny_st >= global_start:
                     res_df.at[idx_forrige, 'Start_dt'] = ny_st
                     res_df.at[idx_forrige, 'Slut_dt'] = ny_st + timedelta(minutes=varighed_min)
 
         res_df['Start'] = res_df['Start_dt'].dt.strftime("%H:%M")
         
-        # Lokaler
+        # Lokaler & Stats
         lokaler = [l.strip() for l in lokaler_raw.split(',') if l.strip()]
         lokale_ledig_fra = {lok: global_start - timedelta(minutes=buffer_min) for lok in lokaler}
         lærer_til_lokale = {}
         lærer_blokke = res_df.groupby('Lærer').agg(Min_S=('Start_dt', 'min'), Max_S=('Slut_dt', 'max')).reset_index().sort_values('Min_S')
-        
         for _, row in lærer_blokke.iterrows():
             valgt_lok = next((lok for lok in lokaler if row['Min_S'] >= lokale_ledig_fra[lok] + timedelta(minutes=buffer_min)), None)
             if valgt_lok:
                 lærer_til_lokale[row['Lærer']] = valgt_lok
                 lokale_ledig_fra[valgt_lok] = row['Max_S']
             else: lærer_til_lokale[row['Lærer']] = "⚠️ MANGLER LOKALE"
-
         res_df['Lokale'] = res_df['Lærer'].map(lærer_til_lokale)
         
-        # Statistik
         pauser = []
         for lær in alle_lærere:
             l_p = res_df[res_df['Lærer'] == lær].sort_values('Start_dt')
@@ -222,11 +205,10 @@ def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffe
             for i in range(len(e_p)-1):
                 gap = (e_p.iloc[i+1]['Start_dt'] - e_p.iloc[i]['Slut_dt']).total_seconds() / 60
                 if gap > 20: advarsler.append(f"{e_p.iloc[0]['Elevnavn']} ({e}): {int(gap)} min")
-                    
         return res_df, advarsler, avg_p
     except Exception as e: return str(e), [], 0
 
-# --- EXCEL FUNKTIONER ---
+# --- EXCEL ---
 def generate_excel_elev(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -252,18 +234,17 @@ def generate_excel_laerer(df):
     return output.getvalue()
 
 # --- APP FLOW ---
-uploaded_file = st.file_uploader("Upload Excel med de korrekte kolonner", type=["xlsx"])
+uploaded_file = st.file_uploader("Upload Excel", type=["xlsx"])
 if uploaded_file:
     df_in = pd.read_excel(uploaded_file)
     if all(col in df_in.columns for col in ['Elevnavn', 'Elevid', 'Ønsker']):
         res, adv, avg_p = beregn_plan(df_in, start_tid_input, lokale_str, parse_tider(specifikke_tider_raw), varighed, lokale_buffer)
         if isinstance(res, str): st.error(res)
         else:
-            st.success(f"Færdig! Sidste samtale kl. {res.sort_values('Slut_dt').iloc[-1]['Slut_dt'].strftime('%H:%M')}")
+            st.success("Plan genereret!")
             st.write(f"📊 **Gennemsnitlig ventetid for lærere:** {avg_p:.1f} min.")
-            if any(res['Lokale'] == "⚠️ MANGLER LOKALE"): st.error("⚠️ LOKALEMANGEL!")
             if adv:
-                with st.expander(f"⚠️ Ventetider over 20 minutter ({len(adv)} elever)"):
+                with st.expander(f"⚠️ Ventetider over 20 minutter ({len(adv)} stk)"):
                     for a in adv: st.write(f"- {a}")
             st.markdown("### Download resultater")
             c1, c2 = st.columns(2)
