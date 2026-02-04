@@ -4,7 +4,7 @@
     <meta charset="UTF-8" /> 
     <meta http-equiv="X-UA-Compatible" content="IE=edge" /> 
     <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" /> 
-    <title>Samtaleplanlægger - Brute Force Optimering</title> 
+    <title>Samtaleplanlægger - Optimeret</title> 
     <script src="https://cdn.jsdelivr.net/gh/gzuidhof/coi-serviceworker@latest/coi-serviceworker.min.js"></script> 
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.39.0/build/stlite.css" /> 
   </head> 
@@ -36,7 +36,7 @@ st.title("🗓️ Samtaleplanlægger")
 
 # --- INSTRUKTION OG EKSEMPEL --- 
 st.info("### 1. Forbered din Excel-fil") 
-st.markdown("Sørg for at dit regneark har præcis disse tre kolonneoverskrifter: **Elevnavn**, **Elevid**, **Ønsker**.") 
+st.markdown("""Sørg for at dit regneark har kolonneoverskrifterne: **Elevnavn**, **Elevid** og **Ønsker**.""") 
 
 example_data = { 
     "Elevnavn": ["Jonas Petersen"], 
@@ -57,33 +57,16 @@ default_lokaler = "101, 409, 308, 309, 310, 312, 313, 315, 317, 508, 509, 510, 5
 lokale_str = st.sidebar.text_area("Lokaler (komma-separeret)", value=default_lokaler) 
 
 st.sidebar.markdown("---") 
-st.sidebar.header("3. Specifikke ønsker") 
-specifikke_tider_raw = st.sidebar.text_area("Vejledninger (Format: ID=tt.mm)", placeholder="AB=17.30\\n1q 18=17.00") 
+st.sidebar.header("3. Optimering")
+iterations = st.sidebar.slider("Antal optimerings-forsøg", 10, 200, 50)
 
 # --- LOGIK --- 
 
-def parse_tider(text_input): 
-    låste_tider = {} 
-    if not text_input: return låste_tider 
-    for line in text_input.split('\\n'): 
-        if '=' in line: 
-            parts = line.split('=') 
-            key = parts[0].strip() 
-            time_val = parts[1].strip().replace('.', ':') 
-            låste_tider[key] = time_val 
-    return låste_tider 
-
-def single_heuristic_run(df_opgaver, global_start, spec_tider_dict, varighed_min):
-    alle_lærere = list(df_opgaver['Lærer'].unique())
-    alle_elever = list(df_opgaver['Elevid'].unique())
-    
-    # Randomiser rækkefølgen af lærere for at skabe variation i hver test
-    random.shuffle(alle_lærere)
-    
+def single_run(df_opgaver, alle_lærere, alle_elever, global_start, spec_tider, varighed_min, shuffle=False):
     lærer_fri = {l: global_start for l in alle_lærere} 
     elev_fri = {e: global_start for e in alle_elever} 
     
-    for k, v in spec_tider_dict.items(): 
+    for k, v in spec_tider.items(): 
         t = datetime.strptime(v, "%H:%M") 
         if k in lærer_fri: lærer_fri[k] = t 
         if k in elev_fri: elev_fri[k] = t 
@@ -91,61 +74,67 @@ def single_heuristic_run(df_opgaver, global_start, spec_tider_dict, varighed_min
     færdig_plan = [] 
     resterende = df_opgaver.copy() 
     
-    # Planlæg alle opgaver
-    for lær in alle_lærere:
-        while True:
-            mine = resterende[resterende['Lærer'] == lær]
-            if mine.empty: break
-            
-            # Find elev med tidligste mulige start (som i udgave 2)
-            bedste_idx = -1
-            min_st = datetime.max
-            
-            # Vi tager eleverne i tilfældig rækkefølge for at finde forskellige løsninger
-            mine_indices = list(mine.index)
-            random.shuffle(mine_indices)
-            
-            for idx in mine_indices:
-                e = mine.at[idx, 'Elevid']
-                mulig_st = max(lærer_fri[lær], elev_fri[e])
-                if mulig_st < min_st:
-                    min_st = mulig_st
-                    bedste_idx = idx
-            
-            valgt = mine.loc[bedste_idx]
-            res_item = {**valgt.to_dict(), 'Start_dt': min_st, 'Slut_dt': min_st + timedelta(minutes=varighed_min)} 
+    # Heuristik: Sorter lærere. Hvis shuffle=True, tilføjer vi støj for at finde andre løsninger
+    lær_list = list(alle_lærere)
+    if shuffle:
+        random.shuffle(lær_list)
+    
+    lærer_prioritet = sorted(lær_list, key=lambda x: -len(df_opgaver[df_opgaver['Lærer']==x])) 
+
+    for lær in lærer_prioritet: 
+        while True: 
+            mine = resterende[resterende['Lærer'] == lær] 
+            if mine.empty: break 
+             
+            bedste_idx = -1 
+            tidligste_start = datetime.max 
+             
+            # Prøv at holde elev-ventetid under 20 min
+            for idx, row in mine.iterrows(): 
+                e = row['Elevid'] 
+                mulig_start = max(lærer_fri[lær], elev_fri[e]) 
+                ventetid_elev = (mulig_start - elev_fri[e]).total_seconds() / 60 
+                 
+                if ventetid_elev <= 20: 
+                    if mulig_start < tidligste_start: 
+                        tidligste_start = mulig_start 
+                        bedste_idx = idx 
+             
+            if bedste_idx == -1: 
+                for idx, row in mine.iterrows(): 
+                    e = row['Elevid'] 
+                    mulig_start = max(lærer_fri[lær], elev_fri[e]) 
+                    if mulig_start < tidligste_start: 
+                        tidligste_start = mulig_start 
+                        bedste_idx = idx 
+             
+            valgt = mine.loc[bedste_idx] 
+            res_item = {**valgt.to_dict(), 'Start_dt': tidligste_start, 'Slut_dt': tidligste_start + timedelta(minutes=varighed_min)} 
             færdig_plan.append(res_item) 
             lærer_fri[lær] = res_item['Slut_dt'] 
             elev_fri[valgt['Elevid']] = res_item['Slut_dt'] 
-            resterende = resterende.drop(bedste_idx)
+            resterende = resterende.drop(bedste_idx) 
 
     res_df = pd.DataFrame(færdig_plan)
     
-    # --- EVALUERING AF DENNE PLAN ---
-    # 1. Tæl elev-gaps over 20 min
-    elev_bad_gaps = 0
+    # Beregn stats
+    bad_elev_count = 0
     for e in alle_elever:
         e_p = res_df[res_df['Elevid'] == e].sort_values('Start_dt')
         for i in range(len(e_p)-1):
-            gap = (e_p.iloc[i+1]['Start_dt'] - e_p.iloc[i]['Slut_dt']).total_seconds() / 60
-            if gap > 20:
-                elev_bad_gaps += 1
+            if (e_p.iloc[i+1]['Start_dt'] - e_p.iloc[i]['Slut_dt']).total_seconds() / 60 > 20:
+                bad_elev_count += 1
                 
-    # 2. Beregn lærernes gns ventetid
-    pauser = []
-    for lær in alle_lærere:
-        l_p = res_df[res_df['Lærer'] == lær].sort_values('Start_dt')
+    laerer_ventetid = []
+    for l in alle_lærere:
+        l_p = res_df[res_df['Lærer'] == l].sort_values('Start_dt')
         for i in range(len(l_p)-1):
-            pauser.append((l_p.iloc[i+1]['Start_dt'] - l_p.iloc[i]['Slut_dt']).total_seconds() / 60)
-    avg_lær_pause = sum(pauser) / len(pauser) if pauser else 0
+            laerer_ventetid.append((l_p.iloc[i+1]['Start_dt'] - l_p.iloc[i]['Slut_dt']).total_seconds() / 60)
     
-    return {
-        'df': res_df,
-        'bad_gaps': elev_bad_gaps,
-        'avg_pause': avg_lær_pause
-    }
+    avg_l_pau = sum(laerer_ventetid) / len(laerer_ventetid) if laerer_ventetid else 0
+    return res_df, bad_elev_count, avg_l_pau
 
-def koer_optimeret_proces(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffer_min):
+def optimer_plan(df, start_str, spec_tider, varighed_min, n_iter):
     global_start = datetime.strptime(start_str.replace('.', ':'), "%H:%M") 
     df = df.dropna(subset=['Elevnavn', 'Elevid', 'Ønsker']) 
     df['Elevid'] = df['Elevid'].astype(str).str.strip() 
@@ -158,73 +147,110 @@ def koer_optimeret_proces(df, start_str, lokaler_raw, spec_tider_dict, varighed_
             lær = item.split()[0] 
             opgaver_liste.append({'Elevid': row['Elevid'], 'Elevnavn': row['Elevnavn'], 'Lærer': lær, 'Klasse': row['Klasse']}) 
     
-    df_opgaver = pd.DataFrame(opgaver_liste)
-    alle_tests = []
+    df_opgaver = pd.DataFrame(opgaver_liste) 
+    alle_lærere = df_opgaver['Lærer'].unique() 
+    alle_elever = df_opgaver['Elevid'].unique() 
     
-    # Vi kører 100 tests for at finde den bedste plan
-    for _ in range(100):
-        alle_tests.append(single_heuristic_run(df_opgaver, global_start, spec_tider_dict, varighed_min))
+    best_df = None
+    best_bad_elev = float('inf')
+    best_avg_l = float('inf')
     
-    # Sortering: 1. Færrest elev-gaps (vi vil have 0), 2. Mindst lærer-pause
-    alle_tests.sort(key=lambda x: (x['bad_gaps'], x['avg_pause']))
-    
-    bedste_test = alle_tests[0]
-    res_df = bedste_test['df']
-    
-    # Tildel lokaler til det valgte resultat
-    lokaler = [l.strip() for l in lokaler_raw.split(',') if l.strip()] 
-    lokale_ledig_fra = {lok: global_start - timedelta(minutes=buffer_min) for lok in lokaler} 
-    lærer_til_lokale = {} 
-    lærer_blokke = res_df.groupby('Lærer').agg(Min_S=('Start_dt', 'min'), Max_S=('Slut_dt', 'max')).reset_index().sort_values('Min_S') 
-    
-    for _, row in lærer_blokke.iterrows(): 
-        valgt_lok = next((lok for lok in lokaler if row['Min_S'] >= lokale_ledig_fra[lok] + timedelta(minutes=buffer_min)), None) 
-        if valgt_lok: 
-            lærer_til_lokale[row['Lærer']] = valgt_lok 
-            lokale_ledig_fra[valgt_lok] = row['Max_S'] 
-        else: lærer_til_lokale[row['Lærer']] = "⚠️ MANGLER LOKALE" 
+    progress_bar = st.progress(0)
+    results_summary = []
 
-    res_df['Lokale'] = res_df['Lærer'].map(lærer_til_lokale) 
-    res_df['Start'] = res_df['Start_dt'].dt.strftime("%H:%M") 
+    for i in range(n_iter):
+        # Kør simulation (iteration 0 er standard, resten er shuffled)
+        current_df, bad_e, avg_l = single_run(df_opgaver, alle_lærere, alle_elever, global_start, spec_tider, varighed_min, shuffle=(i > 0))
+        
+        # Log resultatet
+        results_summary.append({"Forsøg": i+1, "Elev-fejl (>20m)": bad_e, "Lærer-pause (avg)": round(avg_l, 2)})
+        
+        # Opdater bedste plan:
+        # 1. Prioritér færrest elever med > 20 min pause
+        # 2. Hvis ens, prioritér laveste gennemsnitlige pause for lærere
+        if bad_e < best_bad_elev or (bad_e == best_bad_elev and avg_l < best_avg_l):
+            best_bad_elev = bad_e
+            best_avg_l = avg_l
+            best_df = current_df
+        
+        progress_bar.progress((i + 1) / n_iter)
     
-    # Lav advarselsliste til UI
-    advarsler = []
-    alle_elever = res_df['Elevid'].unique()
-    for e in alle_elever:
-        e_p = res_df[res_df['Elevid'] == e].sort_values('Start_dt')
-        for i in range(len(e_p)-1):
-            gap = (e_p.iloc[i+1]['Start_dt'] - e_p.iloc[i]['Slut_dt']).total_seconds() / 60
-            if gap > 20:
-                advarsler.append(f"{e_p.iloc[0]['Elevnavn']} ({e}): {int(gap)} min")
+    return best_df, pd.DataFrame(results_summary), best_bad_elev, best_avg_l
 
-    return res_df, advarsler, bedste_test['avg_pause'], alle_tests
+# --- EXCEL FUNKTIONER (Samme som før) ---
+def generate_excel_elev(df): 
+    output = io.BytesIO() 
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer: 
+        for k in sorted(df['Klasse'].unique()): 
+            df_k = df[df['Klasse'] == k] 
+            p = df_k.pivot_table(index='Elevnavn', columns=['Lærer', 'Lokale'], values='Start', aggfunc='first').fillna("") 
+            if isinstance(p.columns, pd.MultiIndex): p.columns = [f"{l} ({loc})" for l, loc in p.columns] 
+            p.to_excel(writer, sheet_name=f'Klasse {k}') 
+    return output.getvalue() 
+
+def generate_excel_laerer(df): 
+    output = io.BytesIO() 
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer: 
+        adm = df.pivot_table(index='Start', columns=['Lokale', 'Lærer'], values='Elevid', aggfunc='first').fillna("") 
+        if isinstance(adm.columns, pd.MultiIndex): adm.columns = [f"{lok}: {l}" for lok, l in adm.columns] 
+        adm.to_excel(writer, sheet_name="ADMIN_SAMLET_PLAN") 
+        for lær in sorted(df['Lærer'].unique()): 
+            df_l = df[df['Lærer'] == lær].sort_values('Start_dt') 
+            sh = str(lær)[:31].translate({ord(c): None for c in '[]*?/:\\\\'}) 
+            df_l[['Start', 'Elevnavn', 'Elevid', 'Klasse']].to_excel(writer, sheet_name=sh, index=False, startrow=2) 
+            ws = writer.sheets[sh] 
+            ws.write(0, 0, f"Lærer: {lær}"); ws.write(1, 0, f"Lokale: {df_l['Lokale'].iloc[0]}") 
+    return output.getvalue() 
 
 # --- APP FLOW --- 
-uploaded_file = st.file_uploader("Upload Excel med de korrekte kolonner", type=["xlsx"]) 
+uploaded_file = st.file_uploader("Upload Excel", type=["xlsx"]) 
 if uploaded_file: 
     df_in = pd.read_excel(uploaded_file) 
     if all(col in df_in.columns for col in ['Elevnavn', 'Elevid', 'Ønsker']): 
-        with st.spinner('Kører 100 forskellige planlægnings-tests for at finde den bedste løsning...'):
-            res, adv, avg_p, alle_tests = koer_optimeret_proces(df_in, start_tid_input, lokale_str, parse_tider(specifikke_tider_raw), varighed, lokale_buffer) 
         
-        st.success(f"Færdig! Sidste samtale kl. {res.sort_values('Slut_dt').iloc[-1]['Slut_dt'].strftime('%H:%M')}") 
-        st.write(f"📊 **Gennemsnitlig ventetid for lærere:** {avg_p:.1f} min.") 
-        
-        # --- TEST OVERSIGT ---
-        with st.expander("🔍 Se resultater fra alle 100 tests"):
-            test_data = []
-            for i, t in enumerate(alle_tests):
-                test_data.append({"Test nr": i+1, "Elev-gaps > 20m": t['bad_gaps'], "Lærer-pause (gns)": round(t['avg_pause'], 1)})
-            st.table(pd.DataFrame(test_data).head(10)) # Vis de 10 bedste
-            st.caption("Tabellen viser de 10 bedste tests sorteret efter færrest elev-gaps og derefter mindst lærer-pause.")
+        # Pars indstillinger fra sidebar
+        def parse_tider(text_input):
+            låste = {}
+            if not text_input: return låste
+            for line in text_input.split('\\n'):
+                if '=' in line:
+                    parts = line.split('=')
+                    låste[parts[0].strip()] = parts[1].strip().replace('.', ':')
+            return låste
 
-        if any(res['Lokale'] == "⚠️ MANGLER LOKALE"): st.error("⚠️ LOKALEMANGEL!") 
-        if adv: 
-            with st.expander(f"⚠️ Ventetider over 20 minutter ({len(adv)} stk)"): 
-                for a in adv: st.write(f"- {a}") 
-        else:
-            st.balloons()
-            st.success("✅ Succes! Ingen elever har over 20 minutters ventetid i denne plan.")
+        spec_dict = parse_tider(st.sidebar.text_area("Specifikke ønsker (ID=tt.mm)"))
+
+        # KØR OPTIMERING
+        res, stats_df, final_bad_e, final_avg_l = optimer_plan(df_in, start_tid_input, spec_dict, varighed, iterations)
+        
+        # Lokale tildeling (efter bedste plan er fundet)
+        lokaler = [l.strip() for l in lokale_str.split(',') if l.strip()] 
+        lokale_ledig_fra = {lok: datetime.strptime(start_tid_input.replace('.', ':'), "%H:%M") - timedelta(minutes=lokale_buffer) for lok in lokaler} 
+        lærer_til_lokale = {} 
+        lærer_blokke = res.groupby('Lærer').agg(Min_S=('Start_dt', 'min'), Max_S=('Slut_dt', 'max')).reset_index().sort_values('Min_S') 
+         
+        for _, row in lærer_blokke.iterrows(): 
+            valgt_lok = next((lok for lok in lokaler if row['Min_S'] >= lokale_ledig_fra[lok] + timedelta(minutes=lokale_buffer)), None) 
+            if valgt_lok: 
+                lærer_til_lokale[row['Lærer']] = valgt_lok 
+                lokale_ledig_fra[valgt_lok] = row['Max_S'] 
+            else: lærer_til_lokale[row['Lærer']] = "⚠️ MANGLER LOKALE" 
+        res['Lokale'] = res['Lærer'].map(lærer_til_lokale) 
+        res['Start'] = res['Start_dt'].dt.strftime("%H:%M")
+
+        # VIS RESULTATER
+        st.success(f"Optimering færdig! Bedste plan fundet.") 
+        
+        col_a, col_b, col_c = st.columns(3)
+        col_a.metric("Elev-ventetid > 20m", f"{final_bad_e} pers")
+        col_b.metric("Avg. lærerpause", f"{final_avg_l:.1f} min")
+        col_c.metric("Sidste samtale", res['Slut_dt'].max().strftime('%H:%M'))
+
+        with st.expander("Se simulations-log (Alle forsøg)"):
+            st.dataframe(stats_df, use_container_width=True)
+
+        if final_bad_e > 0:
+            st.warning(f"Det lykkedes ikke at bringe alle elever under 20 minutter. Der er {final_bad_e} tilfælde.")
 
         st.markdown("### Download resultater") 
         c1, c2 = st.columns(2) 
