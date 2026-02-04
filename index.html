@@ -8,8 +8,10 @@
     <script src="https://cdn.jsdelivr.net/gh/gzuidhof/coi-serviceworker@latest/coi-serviceworker.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.39.0/build/stlite.css" />
   </head>
+
   <body>
     <div id="root"></div>
+
     <script src="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.39.0/build/stlite.js"></script>
     <script>
       stlite.mount({
@@ -21,65 +23,25 @@ import pandas as pd
 from datetime import datetime, timedelta
 import io
 
-st.set_page_config(page_title="Samtaleplanlægger", layout="wide", page_icon="🗓️")
+st.set_page_config(page_title="Samtaleplanlægger", layout="wide")
 
-# ---------------- UI (IDENTISK MED UDGAVE 1) ----------------
+# ---------------- STYLE ----------------
 st.markdown("""
 <style>
 [data-testid="stSidebar"] { min-width: 450px !important; }
-.stTextInput label, .stTextArea label, .stNumberInput label { font-weight: bold; }
-.example-table { margin-bottom: 20px; border-collapse: collapse; width: 100%; }
-.example-table td, .example-table th { border: 1px solid #ddd; padding: 8px; font-size: 0.9em; }
-.example-table th { background-color: #f2f2f2; text-align: left; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🗓️ Samtaleplanlægger")
 
-st.info("### 1. Forbered din Excel-fil")
-st.markdown("Sørg for at dit regneark har præcis disse tre kolonneoverskrifter.")
-
-example_data = {
-    "Elevnavn": ["Jonas Petersen"],
-    "Elevid": ["1x 07"],
-    "Ønsker": ["AG samfundsfag, SR, FH biologi, FH idræt, GU"]
-}
-st.table(pd.DataFrame(example_data))
-
 # ---------------- SIDEBAR ----------------
-st.sidebar.header("1. Indstillinger")
-start_tid_input = st.sidebar.text_input("Starttidspunkt (tt.mm)", value="17.00")
+st.sidebar.header("Indstillinger")
+start_tid_input = st.sidebar.text_input("Starttidspunkt (tt.mm)", "17.00")
 varighed = st.sidebar.number_input("Varighed (min)", value=10, step=5)
 
-st.sidebar.markdown("---")
-st.sidebar.header("2. Lokaler & Logistik")
-lokale_buffer = st.sidebar.number_input("Pause ved lærerskift i lokale (min)", value=10, step=5)
-lokale_str = st.sidebar.text_area(
-    "Lokaler (komma-separeret)",
-    value="101, 409, 308, 309, 310, 312, 313, 315, 317"
-)
-
-st.sidebar.markdown("---")
-st.sidebar.header("3. Specifikke ønsker")
-specifikke_tider_raw = st.sidebar.text_area(
-    "Vejledninger for specifikke lærere og elever planlægges fra dette tidspunkt (Format: ID=tt.mm)"
-)
-
 # ---------------- HJÆLP ----------------
-
-def parse_tider(text):
-    out = {}
-    if not text:
-        return out
-    for l in text.split("\\n"):
-        if "=" in l:
-            k, v = l.split("=")
-            out[k.strip()] = datetime.strptime(v.strip().replace(".", ":"), "%H:%M")
-    return out
-
 def evaluer_plan(df):
-    elev_wait = []
-    lærer_wait = []
+    elev_wait, lærer_wait = [], []
 
     for e in df['Elevid'].unique():
         p = df[df['Elevid'] == e].sort_values('Start_dt')
@@ -93,8 +55,7 @@ def evaluer_plan(df):
 
     return max(elev_wait) if elev_wait else 0, sum(lærer_wait)/len(lærer_wait) if lærer_wait else 0
 
-# ---------------- KERNEALGORITME (FRA UDGAVE 2) ----------------
-
+# ---------------- KERNEALGORITME (UDGAVE 2) ----------------
 def lav_plan(df_opg, start_dt, lærer_rækkefølge):
     lærer_fri = {l: start_dt for l in df_opg['Lærer'].unique()}
     elev_fri = {e: start_dt for e in df_opg['Elevid'].unique()}
@@ -107,41 +68,34 @@ def lav_plan(df_opg, start_dt, lærer_rækkefølge):
             if mine.empty:
                 break
 
-            bedste = None
-            bedste_start = datetime.max
+            bedste, bedste_start = None, datetime.max
 
-            # SIKRING: <=20 min ventetid
             for idx, r in mine.iterrows():
                 st = max(lærer_fri[lær], elev_fri[r['Elevid']])
                 vent = (st - elev_fri[r['Elevid']]).total_seconds()/60
                 if vent <= 20 and st < bedste_start:
-                    bedste_start = st
-                    bedste = idx
+                    bedste, bedste_start = idx, st
 
-            # fallback
             if bedste is None:
                 for idx, r in mine.iterrows():
                     st = max(lærer_fri[lær], elev_fri[r['Elevid']])
                     if st < bedste_start:
-                        bedste_start = st
-                        bedste = idx
+                        bedste, bedste_start = idx, st
 
             r = mine.loc[bedste]
             sl = bedste_start + timedelta(minutes=varighed)
 
-            plan.append({**r, 'Start_dt': bedste_start, 'Slut_dt': sl})
+            plan.append({**r, "Start_dt": bedste_start, "Slut_dt": sl})
             lærer_fri[lær] = sl
             elev_fri[r['Elevid']] = sl
             rester = rester.drop(bedste)
 
     return pd.DataFrame(plan)
 
-# ---------------- BRUTE FORCE HEURISTIK ----------------
-
+# ---------------- STRATEGI-SØGNING ----------------
 def beregn_bedste(df):
     start_dt = datetime.strptime(start_tid_input.replace(".", ":"), "%H:%M")
 
-    df = df.dropna(subset=['Elevnavn','Elevid','Ønsker'])
     df['Elevid'] = df['Elevid'].astype(str)
     df['Klasse'] = df['Elevid'].str[:2]
 
@@ -149,22 +103,21 @@ def beregn_bedste(df):
     for _, r in df.iterrows():
         for o in str(r['Ønsker']).split(","):
             opg.append({
-                'Elevnavn': r['Elevnavn'],
-                'Elevid': r['Elevid'],
-                'Klasse': r['Klasse'],
-                'Lærer': o.strip().split()[0]
+                "Elevnavn": r['Elevnavn'],
+                "Elevid": r['Elevid'],
+                "Klasse": r['Klasse'],
+                "Lærer": o.strip().split()[0]
             })
     df_opg = pd.DataFrame(opg)
 
     strategier = [
         ("Lærer-belastning", sorted(df_opg['Lærer'].unique(), key=lambda x: -len(df_opg[df_opg['Lærer']==x]))),
-        ("Klasse-sammenhold", df_opg.sort_values('Klasse')['Lærer'].unique()),
+        ("Klasse-sammenhold", df_opg.sort_values("Klasse")['Lærer'].unique()),
         ("Alfabetisk", sorted(df_opg['Lærer'].unique()))
     ]
 
+    bedste, bedste_score = None, 1e9
     tests = []
-    bedste = None
-    bedste_score = 1e9
 
     for navn, rækkefølge in strategier:
         plan = lav_plan(df_opg, start_dt, rækkefølge)
@@ -177,14 +130,32 @@ def beregn_bedste(df):
         })
 
         if max_e <= 20 and avg_l < bedste_score:
-            bedste_score = avg_l
-            bedste = plan.copy()
+            bedste, bedste_score = plan.copy(), avg_l
 
     return bedste, pd.DataFrame(tests)
 
-# ---------------- APP FLOW ----------------
+# ---------------- EXCEL-GENERERING (UDGAVE 1 + 2) ----------------
+def generer_excel(plan, tests):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
 
-uploaded = st.file_uploader("Upload Excel med de korrekte kolonner", type=["xlsx"])
+        elevark = plan.sort_values(["Elevid","Start_dt"])[
+            ["Elevnavn","Elevid","Klasse","Lærer","Start_dt","Slut_dt"]
+        ]
+        elevark.to_excel(writer, sheet_name="Elevoversigt", index=False)
+
+        lærerark = plan.sort_values(["Lærer","Start_dt"])[
+            ["Lærer","Elevnavn","Elevid","Klasse","Start_dt","Slut_dt"]
+        ]
+        lærerark.to_excel(writer, sheet_name="Læreroversigt", index=False)
+
+        plan.to_excel(writer, sheet_name="Samlet plan (rå)", index=False)
+        tests.to_excel(writer, sheet_name="Test-oversigt", index=False)
+
+    return output.getvalue()
+
+# ---------------- APP FLOW ----------------
+uploaded = st.file_uploader("Upload Excel-fil", type=["xlsx"])
 if uploaded:
     df = pd.read_excel(uploaded)
     plan, tests = beregn_bedste(df)
@@ -192,17 +163,18 @@ if uploaded:
     if plan is None:
         st.error("Ingen plan opfyldte kravet om max 20 minutters elevventetid.")
     else:
-        plan['Start'] = plan['Start_dt'].dt.strftime("%H:%M")
-        sidste = plan.sort_values('Slut_dt').iloc[-1]
-        st.success(f"Færdig! Sidste samtale kl. {sidste['Slut_dt'].strftime('%H:%M')}")
+        st.success("Plan genereret korrekt")
 
-        st.markdown("### 🔬 Test-oversigt")
+        excel_bytes = generer_excel(plan, tests)
+        st.download_button(
+            "📥 Hent Excel med faner",
+            data=excel_bytes,
+            file_name="Samtaleplan.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        st.markdown("### Test-oversigt")
         st.dataframe(tests)
-
-        st.markdown("### Download resultater")
-        c1, c2 = st.columns(2)
-        c1.download_button("📥 Hent Elevoversigt", data=plan.to_csv(index=False), file_name="Elevoversigt.csv")
-        c2.download_button("📥 Hent Læreroversigt", data=plan.to_csv(index=False), file_name="Laereroversigt.csv")
 `
         }
       });
