@@ -1,252 +1,282 @@
 <!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="UTF-8" />
-    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
-    <title>Samtaleplanlægger</title>
-    <script src="https://cdn.jsdelivr.net/gh/gzuidhof/coi-serviceworker@latest/coi-serviceworker.min.js"></script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.39.0/build/stlite.css" />
-  </head>
-  <body>
-    <div id="root"></div>
-    <script src="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.39.0/build/stlite.js"></script>
-    <script>
-      stlite.mount({
-        requirements: ["pandas", "openpyxl", "xlsxwriter"],
-        files: {
-          "streamlit_app.py": `
-import streamlit as st
-import pandas as pd
-from datetime import datetime, timedelta
-import io
+<html lang="da">
+<head>
+    <meta charset="UTF-8">
+    <title>Samtale Fordeler v21 - Brute Force & 30m Loft</title>
+    <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+    <style>
+        body { font-family: sans-serif; margin: 20px; background: #f0f4f8; }
+        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); max-width: 1000px; margin: auto; }
+        textarea { width: 100%; border: 1px solid #b2bec3; border-radius: 6px; padding: 10px; font-family: monospace; box-sizing: border-box; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 15px 0; }
+        button { background: #c0392b; color: white; padding: 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 18px; width: 100%; font-weight: bold; }
+        .log { background: #2d3436; color: #00ff00; padding: 15px; border-radius: 6px; font-family: monospace; font-size: 11px; height: 180px; overflow-y: auto; margin-top: 15px; }
+        .progress-bar { background: #eee; height: 15px; border-radius: 10px; margin: 10px 0; overflow: hidden; }
+        .progress-fill { background: #c0392b; height: 100%; width: 0%; transition: width 0.1s; }
+        .stat-box { display: flex; gap: 20px; margin-bottom: 10px; font-weight: bold; }
+    </style>
+</head>
+<body>
 
-st.set_page_config(page_title="Samtaleplanlægger", layout="wide", page_icon="🗓️")
+<div class="card">
+    <h1>🗓️ Samtale Fordeler v21</h1>
+    <div class="stat-box">
+        <div id="stat-unplaced" style="color: #c0392b;">Afviste: -</div>
+        <div id="stat-student">Elev-gap: -</div>
+        <div id="stat-efficiency">Lærer-effekt: -</div>
+    </div>
 
-# --- UI STYLING ---
-st.markdown("""
-<style>
-    [data-testid="stSidebar"] { min-width: 450px !important; }
-    .stTextInput label, .stTextArea label, .stNumberInput label { font-weight: bold; }
-    .example-table { margin-bottom: 20px; border-collapse: collapse; width: 100%; }
-    .example-table td, .example-table th { border: 1px solid #ddd; padding: 8px; font-size: 0.9em; }
-    .example-table th { background-color: #f2f2f2; text-align: left; }
-</style>
-""", unsafe_allow_html=True)
+    <label>1. Input: Elevdata</label>
+    <textarea id="rawInput" style="height: 100px;"></textarea>
 
-st.title("🗓️ Samtaleplanlægger")
+    <div class="grid">
+        <div class="input-group">
+            <label>Standard Tider</label><br>
+            Start: <input type="time" id="startTime" value="17:00"> 
+            Slut: <input type="time" id="endTime" value="21:00"><br><br>
+            Varighed: <input type="number" id="duration" value="10" style="width: 50px;"> min.
+        </div>
+        <div class="input-group">
+            <label>Individuel starttid (ID, Tid)</label>
+            <textarea id="locks" style="height: 65px;" placeholder="JS, 15:30"></textarea>
+        </div>
+    </div>
 
-# --- INSTRUKTION OG EKSEMPEL ---
-st.info("### 1. Forbered din Excel-fil")
-st.markdown("""
-Sørg for at dit regneark har præcis disse tre kolonneoverskrifter. Her er et eksempel på, hvordan en række kan se ud:
-""")
+    <button id="runBtn" onclick="runOptimized()">KØR BRUTE FORCE (20.000 SIMULERINGER)</button>
+    <div class="progress-bar"><div id="progress" class="progress-fill"></div></div>
+    <div class="log" id="status">Klar...</div>
+</div>
 
-# Visuel tabel-eksempel med Jonas Petersen
-example_data = {
-    "Elevnavn": ["Jonas Petersen"],
-    "Elevid": ["1x 07"],
-    "Ønsker": ["AG samfundsfag, SR, FH biologi, FH idræt, GU"]
+<script>
+function parseTime(s) { const [h, m] = s.split(':').map(Number); return h * 60 + m; }
+function formatTime(m) { return `${Math.floor(m/60)}:${(m%60).toString().padStart(2, '0')}`; }
+function getTeacherInitials(str) { return str.trim().split(' ')[0].toUpperCase(); }
+
+function runOptimized() {
+    const btn = document.getElementById('runBtn');
+    const log = document.getElementById('status');
+    const prog = document.getElementById('progress');
+    const input = document.getElementById('rawInput').value.trim();
+    const locksRaw = document.getElementById('locks').value.trim();
+    if(!input) return alert("Indsæt data");
+
+    btn.disabled = true;
+    let bestFinalResult = null;
+    let bestScore = Infinity;
+    const iterations = 20000;
+    const batchSize = 250; 
+    let i = 0;
+
+    log.innerHTML = "Starter Brute Force (20.000)...<br>";
+
+    function doBatch() {
+        for (let b = 0; b < batchSize && i < iterations; b++) {
+            const result = runSingleSimulation(input, locksRaw, i !== 0);
+            if (result.score < bestScore) {
+                bestScore = result.score;
+                bestFinalResult = result;
+                updateStats(result);
+                log.innerHTML += `[${i}] Ny bedste plan fundet. Afviste: ${result.unplacedCount}<br>`;
+                log.scrollTop = log.scrollHeight;
+            }
+            i++;
+        }
+        prog.style.width = (i / iterations * 100) + "%";
+        if (i < iterations) {
+            setTimeout(doBatch, 0);
+        } else {
+            log.innerHTML += "<strong>Optimering færdig!</strong>";
+            btn.disabled = false;
+            generateExcel(bestFinalResult);
+        }
+    }
+    doBatch();
 }
-st.table(pd.DataFrame(example_data))
 
-st.markdown("""
-Regnearket kan godt have flere kolonner, men de bliver ignoreret. Det samme gælder fagene - det er kun initialerne, som programmet bruger.
-""")
+function updateStats(res) {
+    document.getElementById('stat-unplaced').innerText = "Afviste: " + res.unplacedCount;
+    document.getElementById('stat-student').innerText = "Elev-gap: " + res.studentGap + "m";
+    document.getElementById('stat-efficiency').innerText = "Lærer-effekt: " + Math.round(res.teacherEfficiency);
+}
 
-# --- SIDEBAR ---
-st.sidebar.header("1. Indstillinger")
-start_tid_input = st.sidebar.text_input("Starttidspunkt (tt.mm)", value="17.00")
-varighed = st.sidebar.number_input("Varighed (min)", value=10, step=5)
+function runSingleSimulation(input, locksRaw, shuffle) {
+    const duration = parseInt(document.getElementById('duration').value);
+    const globalStartM = parseTime(document.getElementById('startTime').value);
+    const endM = parseTime(document.getElementById('endTime').value);
+    const roomList = ["101", "409", "308", "309", "310", "312", "313", "315", "317", "508", "509", "510", "511", "513", "320", "321", "322", "323", "324", "210", "211", "213", "215", "216", "217", "218", "219", "220"];
+    
+    const startConstraints = {};
+    let minS = globalStartM;
+    if(locksRaw) {
+        locksRaw.split('\n').forEach(line => {
+            const p = line.split(',');
+            if(p.length === 2) {
+                const t = parseTime(p[1].trim());
+                startConstraints[p[0].trim().toUpperCase()] = t;
+                if(t < minS) minS = t;
+            }
+        });
+    }
 
-st.sidebar.markdown("---")
-st.sidebar.header("2. Lokaler & Logistik")
-lokale_buffer = st.sidebar.number_input("Pause ved lærerskift i lokale (min)", value=10, step=5)
-default_lokaler = "101, 409, 308, 309, 310, 312, 313, 315, 317, 508, 509, 510, 511, 513, 320, 321, 322, 323, 324, 210, 211, 213, 215, 216, 217, 218, 219, 220, Møde 1, Møde 2, Møde 3, Møde 4, Møde 5"
-lokale_str = st.sidebar.text_area("Lokaler (komma-separeret)", value=default_lokaler)
+    const slots = [];
+    for(let t = minS; t < endM; t += duration) slots.push(t);
 
-st.sidebar.markdown("---")
-st.sidebar.header("3. Specifikke ønsker")
-specifikke_tider_raw = st.sidebar.text_area("Vejledninger for specifikke lærere og elever planlægges fra dette tidspunkt (Format: ID=tt.mm)", placeholder="AB=17.30\\n1q 18=17.00")
+    let students = input.split('\n').map(line => {
+        const parts = line.split('\t');
+        return { name: parts[0], id: parts[1], class: parts[1].substring(0,2), wishes: parts[2].split(',').map(w => ({ fullText: w.trim(), initials: getTeacherInitials(w), done: false, reason: "" })), schedule: {} };
+    });
 
-# --- LOGIK ---
+    if(shuffle) students.sort(() => Math.random() - 0.5);
 
-def parse_tider(text_input):
-    låste_tider = {}
-    if not text_input: return låste_tider
-    for line in text_input.split('\\n'):
-        if '=' in line:
-            parts = line.split('=')
-            key = parts[0].strip()
-            time_val = parts[1].strip().replace('.', ':')
-            låste_tider[key] = time_val
-    return låste_tider
+    const teacherIds = [...new Set(students.flatMap(s => s.wishes.map(w => w.initials)))];
+    const teachers = {};
+    teacherIds.forEach((init, idx) => {
+        teachers[init] = { id: init, room: roomList[idx % roomList.length], plan: {}, firstStart: startConstraints[init] || globalStartM };
+    });
 
-def beregn_plan(df, start_str, lokaler_raw, spec_tider_dict, varighed_min, buffer_min):
-    try:
-        start_dt = datetime.strptime(start_str.replace('.', ':'), "%H:%M")
-        df = df.dropna(subset=['Elevnavn', 'Elevid', 'Ønsker'])
-        df['Elevid'] = df['Elevid'].astype(str).str.strip()
-        df['Klasse'] = df['Elevid'].str[:2]
+    const roomOccupancy = {};
+
+    function canBook(teacher, slot, room) {
+        if (slot < teacher.firstStart || teacher.plan[slot] || (roomOccupancy[slot] && roomOccupancy[slot][room])) return false;
         
-        samtaler_liste = []
-        for _, row in df.iterrows():
-            ønsker = [x.strip() for x in str(row['Ønsker']).split(',') if x.strip()]
-            for item in ønsker:
-                lær = item.split()[0]
-                samtaler_liste.append({
-                    'Elevid': row['Elevid'], 
-                    'Elevnavn': row['Elevnavn'], 
-                    'Lærer': lær, 
-                    'Klasse': row['Klasse']
-                })
-        
-        df_samtaler = pd.DataFrame(samtaler_liste)
-        alle_lærere = df_samtaler['Lærer'].unique()
-        alle_elever = df_samtaler['Elevid'].unique()
-
-        lærer_fri = {l: start_dt for l in alle_lærere}
-        elev_fri = {e: start_dt for e in alle_elever}
-        
-        # Påfør låste tider
-        for k, v in spec_tider_dict.items():
-            t = datetime.strptime(v, "%H:%M")
-            if k in lærer_fri: lærer_fri[k] = t
-            if k in elev_fri: elev_fri[k] = t
-
-        færdig_plan = []
-        resterende = df_samtaler.copy()
-        
-        # Prioriter lærere (låste først, derefter dem med flest samtaler)
-        lærer_prioritet = sorted(alle_lærere, key=lambda x: (0 if x in spec_tider_dict else 1, -len(df_samtaler[df_samtaler['Lærer']==x])))
-
-        for lær in lærer_prioritet:
-            while True:
-                mine_elever = resterende[resterende['Lærer'] == lær]
-                if mine_elever.empty: break
-                
-                # SIKRINGS-LOGIK: Find elev der er ledig med under 20 min ventetid
-                bedste_elev_idx = -1
-                tidligste_start = datetime.max
-                
-                # 1. Forsøg først at finde et match med UNDER 20 min ventetid for eleven
-                for idx, row in mine_elever.iterrows():
-                    e = row['Elevid']
-                    mulig_start = max(lærer_fri[lær], elev_fri[e])
-                    ventetid = (mulig_start - elev_fri[e]).total_seconds() / 60
-                    
-                    if ventetid <= 20 and mulig_start < tidligste_start:
-                        tidligste_start = mulig_start
-                        bedste_elev_idx = idx
-                
-                # 2. Hvis ingen passer i 20-min vinduet, tag den der trods alt er ledig tidligst
-                if bedste_elev_idx == -1:
-                    for idx, row in mine_elever.iterrows():
-                        e = row['Elevid']
-                        mulig_start = max(lærer_fri[lær], elev_fri[e])
-                        if mulig_start < tidligste_start:
-                            tidligste_start = mulig_start
-                            bedste_elev_idx = idx
-                
-                valgt = mine_elever.loc[bedste_elev_idx]
-                st_tid = tidligste_start
-                sl_tid = st_tid + timedelta(minutes=varighed_min)
-                
-                færdig_plan.append({**valgt.to_dict(), 'Start_dt': st_tid, 'Slut_dt': sl_tid})
-                lærer_fri[lær] = sl_tid
-                elev_fri[valgt['Elevid']] = sl_tid
-                resterende = resterende.drop(bedste_elev_idx)
-
-        res_df = pd.DataFrame(færdig_plan)
-        
-        # --- LOKALER ---
-        lokaler = [l.strip() for l in lokaler_raw.split(',') if l.strip()]
-        lærer_blokke = res_df.groupby('Lærer').agg(Min_Start=('Start_dt', 'min'), Max_Slut=('Slut_dt', 'max')).reset_index().sort_values('Min_Start')
-        lokale_ledig_fra = {lok: start_dt - timedelta(minutes=buffer_min) for lok in lokaler}
-        lærer_til_lokale = {}
-        
-        for _, row in lærer_blokke.iterrows():
-            lær, s_blok = row['Lærer'], row['Min_Start']
-            valgt_lok = None
-            for lok in lokaler:
-                if s_blok >= lokale_ledig_fra[lok] + timedelta(minutes=buffer_min):
-                    valgt_lok = lok
-                    lokale_ledig_fra[lok] = row['Max_Slut']
-                    break
-            lærer_til_lokale[lær] = valgt_lok if valgt_lok else "⚠️ MANGLER LOKALE"
-
-        res_df['Lokale'] = res_df['Lærer'].map(lærer_til_lokale)
-        res_df['Start'] = res_df['Start_dt'].dt.strftime("%H:%M")
-        
-        # --- VENTETIDSTJEK ---
-        advarsler = []
-        for e in alle_elever:
-            e_p = res_df[res_df['Elevid'] == e].sort_values('Start_dt')
-            for i in range(len(e_p)-1):
-                gap = (e_p.iloc[i+1]['Start_dt'] - e_p.iloc[i]['Slut_dt']).total_seconds() / 60
-                if gap > 20:
-                    advarsler.append(f"{e_p.iloc[0]['Elevnavn']} ({e}): {int(gap)} min")
-                    
-        return res_df, advarsler
-    except Exception as e: return str(e), []
-
-# --- EXCEL GENERERING ---
-
-def generate_excel_elev(df):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        for k in sorted(df['Klasse'].unique()):
-            df_k = df[df['Klasse'] == k]
-            p = df_k.pivot_table(index='Elevnavn', columns=['Lærer', 'Lokale'], values='Start', aggfunc='first').fillna("")
-            if isinstance(p.columns, pd.MultiIndex):
-                p.columns = [f"{l} ({loc})" for l, loc in p.columns]
-            p.to_excel(writer, sheet_name=f'Klasse {k}')
-    return output.getvalue()
-
-def generate_excel_laerer(df):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        adm = df.pivot_table(index='Start', columns=['Lokale', 'Lærer'], values='Elevid', aggfunc='first').fillna("")
-        if isinstance(adm.columns, pd.MultiIndex):
-            adm.columns = [f"{lok}: {l}" for lok, l in adm.columns]
-        adm.to_excel(writer, sheet_name="ADMIN_SAMLET_PLAN")
-        for lær in sorted(df['Lærer'].unique()):
-            df_l = df[df['Lærer'] == lær].sort_values('Start_dt')
-            sh = str(lær)[:31].translate({ord(c): None for c in '[]*?/:\\\\'})
-            df_l[['Start', 'Elevnavn', 'Elevid', 'Klasse']].to_excel(writer, sheet_name=sh, index=False, startrow=2)
-            ws = writer.sheets[sh]
-            ws.write(0, 0, f"Lærer: {lær}"); ws.write(1, 0, f"Lokale: {df_l['Lokale'].iloc[0]}")
-    return output.getvalue()
-
-# --- APP FLOW ---
-uploaded_file = st.file_uploader("Upload Excel med disse kolonneoverskrifter: 'Elevnavn', 'Elevid', 'Ønsker' - andre kolonner ignoreres", type=["xlsx"])
-if uploaded_file:
-    df_in = pd.read_excel(uploaded_file)
-    if all(col in df_in.columns for col in ['Elevnavn', 'Elevid', 'Ønsker']):
-        res, adv = beregn_plan(df_in, start_tid_input, lokale_str, parse_tider(specifikke_tider_raw), varighed, lokale_buffer)
-        
-        if isinstance(res, str):
-            st.error(res)
-        else:
-            sidste = res.sort_values('Start_dt').iloc[-1]
-            st.success(f"Færdig! Sidste samtale kl. {sidste['Slut_dt'].strftime('%H:%M')}")
+        // Max 30 min hul tjek
+        const ts = Object.keys(teacher.plan).map(Number).sort((a,b) => a-b);
+        if(ts.length > 0) {
+            let gapToStart = slot - teacher.firstStart;
+            let gapToPrev = 0;
+            let gapToNext = 0;
             
-            if any(res['Lokale'] == "⚠️ MANGLER LOKALE"):
-                st.error("⚠️ LOKALEMANGEL! Prøv at tilføje flere lokaler eller reducere bufferen.")
-            
-            if adv:
-                with st.expander("⚠️ Ventetider over 20 minutter"):
-                    for a in adv: st.write(f"- {a}")
-            
-            st.markdown("### Download resultater")
-            c1, c2 = st.columns(2)
-            c1.download_button("📥 Hent Elevoversigt (Klassedelt)", data=generate_excel_elev(res), file_name="Elevoversigt.xlsx")
-            c2.download_button("📥 Hent Læreroversigt (Individuel)", data=generate_excel_laerer(res), file_name="Laereroversigt.xlsx")
-    else:
-        st.error("Filen skal indeholde: 'Elevnavn', 'Elevid', 'Ønsker'.")
-`
-        },
-      });
-    </script>
-  </body>
+            // Find nærmeste eksisterende samtaler
+            let prev = ts.filter(t => t < slot).pop();
+            let next = ts.filter(t => t > slot).shift();
+
+            if(prev) gapToPrev = slot - prev - duration;
+            else gapToPrev = slot - teacher.firstStart; // Hul fra deres ønskede starttid
+
+            if(gapToPrev > 30) return "GAP"; // Fejlkode for stort hul
+        }
+
+        // 7-reglen
+        let count = 1, tL = slot - duration, tR = slot + duration;
+        while(teacher.plan[tL]) { count++; tL -= duration; }
+        while(teacher.plan[tR]) { count++; tR += duration; }
+        if(count > 7) return false;
+
+        return true;
+    }
+
+    for (let target = 3; target >= 1; target--) {
+        students.forEach(s => {
+            let active = s.wishes.filter(w => !w.done);
+            if (active.length < target) return;
+
+            let bestWin = null;
+            let lowestScore = Infinity;
+
+            for (let i = 0; i < slots.length; i++) {
+                let curSched = {}, curT = slots[i], placed = 0, penalty = 0;
+                let lastT = -1;
+
+                for (let wish of active) {
+                    if (placed >= target) break;
+                    let found = false;
+                    for (let gap = 0; gap <= 20; gap += duration) {
+                        let t = curT + gap;
+                        if (t >= endM) break;
+                        const tea = teachers[wish.initials];
+                        const res = canBook(tea, t, tea.room);
+                        if (res === true) {
+                            curSched[t] = wish;
+                            if (lastT !== -1) penalty += (t - lastT - duration) * 5; 
+                            lastT = t; curT = t + duration; placed++; found = true;
+                            break;
+                        } else if (res === "GAP") {
+                            wish.reason = "Ville skabe >30 min hul hos " + wish.initials;
+                        }
+                    }
+                    if(!found) break;
+                }
+                if (placed === target && penalty < lowestScore) { lowestScore = penalty; bestWin = curSched; }
+            }
+
+            if (bestWin) {
+                Object.keys(bestWin).forEach(t => {
+                    const time = parseInt(t); const wish = bestWin[t]; const tea = teachers[wish.initials];
+                    tea.plan[time] = { studentId: s.id, studentName: s.name, subject: wish.fullText };
+                    if(!roomOccupancy[time]) roomOccupancy[time] = {};
+                    roomOccupancy[time][tea.room] = tea.id;
+                    s.schedule[time] = wish.fullText;
+                    wish.done = true;
+                });
+            }
+        });
+    }
+
+    let unplaced = 0, sGap = 0, effPen = 0;
+    students.forEach(s => {
+        unplaced += s.wishes.filter(w => !w.done).length;
+        const ts = Object.keys(s.schedule).map(Number).sort((a,b) => a-b);
+        for(let j=1; j<ts.length; j++) sGap += (ts[j] - ts[j-1] - duration);
+    });
+    Object.values(teachers).forEach(tea => {
+        const ts = Object.keys(tea.plan).map(Number).sort((a,b) => a-b);
+        if(ts.length > 0) {
+            const gap = (ts[ts.length-1]-ts[0]+duration) - (ts.length*duration);
+            effPen += (gap * gap) / ts.length;
+        }
+    });
+
+    const score = (unplaced * 100000) + (sGap * 10) + effPen;
+    return { score, students, teachers, slots, unplacedCount: unplaced, studentGap: sGap, teacherEfficiency: effPen };
+}
+
+function generateExcel(res) {
+    const wb = XLSX.utils.book_new();
+    const sortedT = Object.keys(res.teachers).sort();
+    const matrix = [["Lokale", ...sortedT.map(id => res.teachers[id].room)], ["Tid", ...sortedT]];
+    res.slots.forEach(t => {
+        const row = [formatTime(t)];
+        sortedT.forEach(id => row.push(res.teachers[id].plan[t] ? res.teachers[id].plan[t].studentId : ""));
+        matrix.push(row);
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(matrix), "Lærer_Matrix");
+    
+    // Klasse-ark
+    const classIds = [...new Set(res.students.map(s => s.class))].sort();
+    classIds.forEach(c => {
+        const cStus = res.students.filter(s => s.class === c);
+        const cWishes = [...new Set(cStus.flatMap(s => s.wishes.map(w => w.fullText)))].sort();
+        const rows = [["Navn", "ElevID", ...cWishes]];
+        cStus.forEach(s => {
+            const row = [s.name, s.id];
+            cWishes.forEach(wT => {
+                const time = Object.keys(s.schedule).find(k => s.schedule[k] === wT);
+                row.push(time ? formatTime(parseInt(time)) : "");
+            });
+            rows.push(row);
+        });
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), "Klasse_" + c);
+    });
+
+    // IKKE PLACERET med forklaring
+    const unp = [["ID", "Navn", "Lærer/Fag", "Årsag"]];
+    res.students.forEach(s => {
+        s.wishes.filter(w => !w.done).forEach(w => {
+            unp.push([s.id, s.name, w.fullText, w.reason || "Ingen ledig tid fundet indenfor elevens 20-min ramme"]);
+        });
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(unp), "IKKE_PLACERET");
+
+    sortedT.forEach(id => {
+        const rows = [["Tid", "Navn", "ID", "Fag"]];
+        res.slots.forEach(t => {
+            const p = res.teachers[id].plan[t];
+            rows.push([formatTime(t), p ? p.studentName : "", p ? p.studentId : "", p ? p.subject : ""]);
+        });
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), "Lærer_" + id);
+    });
+    XLSX.writeFile(wb, "Samtaleplan_v21_BruteForce.xlsx");
+}
+</script>
+</body>
 </html>
